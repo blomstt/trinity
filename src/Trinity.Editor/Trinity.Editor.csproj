@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>trinity-editor</AssemblyName>
+    <RootNamespace>Trinity.Editor</RootNamespace>
+    <Description>Trinity Editor: viewport, scene hierarchy, inspector, assets, log, and Play.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Trinity/Trinity.csproj" />
+    <PackageReference Include="Ahwoo.Brutal.ImGui" Version="$(BrutalVersion2)" />
+    <PackageReference Include="Ahwoo.Brutal.ImGui.Backends" Version="$(BrutalVersion2)" />
+  </ItemGroup>
+  </Project>

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Trinity core: window, input, time, logging, jobs.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.Brutal.Core" Version="$(BrutalVersion)" />
+    <PackageReference Include="Ahwoo.Brutal.Numerics" Version="$(BrutalVersion)" />
+    <PackageReference Include="Ahwoo.Brutal.Concurrency" Version="$(BrutalVersion)" />
+    <PackageReference Include="Ahwoo.Brutal.Glfw" Version="2026.10.4" />
+  </ItemGroup>
+</Project>

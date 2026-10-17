@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Battle/Battle.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Trinity.Animation/Trinity.Animation.csproj" />
+    <Project Path="src/Trinity.Core/Trinity.Core.csproj" />
+    <Project Path="src/Trinity.Editor/Trinity.Editor.csproj" />
+    <Project Path="src/Trinity.Graphics/Trinity.Graphics.csproj" />
+    <Project Path="src/Trinity/Trinity.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Trinity.Tests/Trinity.Tests.csproj" />
+  </Folder>
+</Solution>

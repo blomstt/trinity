@@ -1,0 +1,39 @@
+using System.Text.Json;
+
+namespace Trinity.Editor;
+
+/// <summary>
+/// A game the editor works on, described by a <c>trinity.json</c> at the game's root:
+/// <code>{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes" }</code>
+/// Paths are relative to the file.
+/// </summary>
+sealed class EditorProject
+{
+    public string Name { get; init; } = "Untitled";
+    public string Game { get; init; } = "";
+    public string Assets { get; init; } = "Assets";
+    public string Scenes { get; init; } = "Scenes";
+
+    public string Root { get; private set; } = "";
+    public string AssetsPath => Path.Combine(Root, Assets);
+    public string ScenesPath => Path.Combine(Root, Scenes);
+    public string GamePath => Path.Combine(Root, Game);
+
+    public static EditorProject Load(string pathOrFolder)
+    {
+        var file = Directory.Exists(pathOrFolder) ? Path.Combine(pathOrFolder, "trinity.json") : pathOrFolder;
+        if (!File.Exists(file))
+            throw new FileNotFoundException($"No trinity.json at {pathOrFolder}");
+        var project = JsonSerializer.Deserialize<EditorProject>(
+            File.ReadAllText(file),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+        ) ?? new EditorProject();
+        project.Root = Path.GetDirectoryName(Path.GetFullPath(file))!;
+        return project;
+    }
+
+    /// <summary>A path relative to the project root, for saving in scenes.</summary>
+    public string Relative(string path) => Path.GetRelativePath(Root, path);
+
+    public string Absolute(string relative) => Path.GetFullPath(Path.Combine(Root, relative));
+}

@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <TieredPGO>true</TieredPGO>
+    <!-- No ICU locale data: games format their own text -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>0.1.0</Version>
+    <Authors>blomst</Authors>
+    <Product>Trinity</Product>
+    <!-- BRUTAL package versions, one place to bump them -->
+    <BrutalVersion>2026.10.1</BrutalVersion>
+    <BrutalVersion2>2026.10.2</BrutalVersion2>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Trinity animation: glTF skinned models, animation baked for GPU skinning.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Trinity.Graphics/Trinity.Graphics.csproj" />
+    <PackageReference Include="Ahwoo.Brutal.Gltf" Version="$(BrutalVersion2)" />
+  </ItemGroup>
+  </Project>

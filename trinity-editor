@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Starts Trinity Editor. Pass a project folder, or it opens the last one.
+#   ./trinity-editor samples/Battle
+# Builds only when there's no build yet; after changing the editor, run: dotnet build src/Trinity.Editor -c Release
+here="$(dirname "$(readlink -f "$0")")"
+dll="$here/src/Trinity.Editor/bin/Release/net10.0/trinity-editor.dll"
+[[ -f "$dll" ]] || dotnet build "$here/src/Trinity.Editor" -c Release -nologo -v q >/dev/null || { echo "Build failed" >&2; exit 1; }
+args=()
+for a in "$@"; do
+    # Project paths are made absolute; options pass through
+    if [[ "$a" != --* && -e "$a" ]]; then args+=("$(readlink -f "$a")"); else args+=("$a"); fi
+done
+exec dotnet "$dll" "${args[@]}" 2> >(grep -v 'radv is not a conformant' >&2)

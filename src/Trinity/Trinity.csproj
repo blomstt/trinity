@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Trinity engine host: runs a Game with a window, input, GPU, jobs and shaders.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Trinity.Core/Trinity.Core.csproj" />
+    <ProjectReference Include="../Trinity.Graphics/Trinity.Graphics.csproj" />
+    <ProjectReference Include="../Trinity.Animation/Trinity.Animation.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Every game built on Trinity gets these next to its executable -->
+    <None Include="Branding/brutal-logo-white.png" Link="Trinity/brutal-logo-white.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- BRUTAL License v1.0 section 2.3: NOTICE.txt ships alongside the product -->
+    <None Include="Branding/NOTICE.txt" Link="NOTICE.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

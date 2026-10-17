@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Trinity graphics: Vulkan device and frame loop, buffers, shaders, pipelines, cameras, video capture.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Trinity.Core/Trinity.Core.csproj" />
+    <PackageReference Include="Ahwoo.Brutal.Vulkan" Version="$(BrutalVersion2)" />
+    <PackageReference Include="Ahwoo.Brutal.Vulkan.Abstractions" Version="$(BrutalVersion2)" />
+    <PackageReference Include="Ahwoo.Brutal.Stb" Version="$(BrutalVersion2)" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,84 @@
+<Project>
+  <!--
+    GLSL shaders in a project's Shaders/ folder (.vert .frag .comp) are compiled to SPIR-V by glslc at
+    build time and shipped as Shaders/<name>.spv next to the executable, flowing to every project that
+    references this one. No shader compiler ships with games. Includes resolve from the project's own
+    Shaders/ folder and Trinity.Animation's (skinning.glsl).
+  -->
+  <ItemGroup>
+    <TrinityShader Include="Shaders/**/*.vert;Shaders/**/*.frag;Shaders/**/*.comp" />
+  </ItemGroup>
+
+  <Target Name="TrinityCompileShaders"
+          BeforeTargets="AssignTargetPaths"
+          Condition="'@(TrinityShader)' != ''"
+          Inputs="@(TrinityShader);@(TrinityShaderInclude);$(MSBuildThisFileDirectory)src/Trinity.Animation/Shaders/skinning.glsl"
+          Outputs="@(TrinityShader->'$(IntermediateOutputPath)shaders/%(Filename)%(Extension).spv')">
+    <MakeDir Directories="$(IntermediateOutputPath)shaders" />
+    <Exec Command="glslc -O --target-env=vulkan1.3 -I &quot;$(MSBuildProjectDirectory)/Shaders&quot; -I &quot;$(MSBuildThisFileDirectory)src/Trinity.Animation/Shaders&quot; &quot;%(TrinityShader.FullPath)&quot; -o &quot;$(IntermediateOutputPath)shaders/%(TrinityShader.Filename)%(TrinityShader.Extension).spv&quot;" />
+  </Target>
+
+  <!-- Hand the compiled files to the normal copy-to-output machinery (also for referencing projects) -->
+  <Target Name="TrinityShipShaders" AfterTargets="TrinityCompileShaders" BeforeTargets="AssignTargetPaths" Condition="'@(TrinityShader)' != ''">
+    <ItemGroup>
+      <None Include="@(TrinityShader->'$(IntermediateOutputPath)shaders/%(Filename)%(Extension).spv')"
+            Link="Shaders/%(Filename)%(Extension).spv"
+            CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    Executables get the licence texts of every package they ship, in licenses/ next to the executable:
+    BRUTAL's LICENSE.txt (BRUTAL License 1.0), each Brutal package's third-party notices, and the
+    licence files of other packages. Needed for anything distributed (see THIRD_PARTY_NOTICES.md).
+  -->
+  <UsingTask TaskName="TrinityCollectLicenses" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <References ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <PackageRoot ParameterType="System.String" Required="true" />
+      <Files ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Collections.Generic" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var found = new Dictionary<string, ITaskItem>();
+        var seen = new HashSet<string>();
+        foreach (var r in References)
+        {
+            var id = r.GetMetadata("NuGetPackageId");
+            var version = r.GetMetadata("NuGetPackageVersion");
+            if (id.Length == 0 || !seen.Add(id))
+                continue;
+            var dir = Path.Combine(PackageRoot, id.ToLowerInvariant(), version);
+            if (!Directory.Exists(dir))
+                continue;
+            var brutal = id.StartsWith("Ahwoo.Brutal", StringComparison.OrdinalIgnoreCase);
+            foreach (var f in Directory.GetFiles(dir))
+            {
+                var name = Path.GetFileName(f).ToUpperInvariant();
+                if (!(name.StartsWith("LICENSE") || name.StartsWith("THIRD-PARTY-NOTICES") || name.StartsWith("THIRDPARTYNOTICES")))
+                    continue;
+                // Every Brutal package carries the same BRUTAL licence; keep one copy
+                var target = brutal && name.StartsWith("LICENSE") ? "BRUTAL-LICENSE.txt" : id + "-" + Path.GetFileName(f);
+                found[target] = new TaskItem(f, new Dictionary<string, string> { { "LicenseName", target } });
+            }
+            var notices = Path.Combine(dir, "LICENSES");
+            if (Directory.Exists(notices))
+                foreach (var f in Directory.GetFiles(notices))
+                    found[Path.GetFileName(f)] = new TaskItem(f, new Dictionary<string, string> { { "LicenseName", Path.GetFileName(f) } });
+        }
+        Files = new List<ITaskItem>(found.Values).ToArray();
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="TrinityShipLicenses" AfterTargets="Build" Condition="'$(OutputType)' == 'Exe'">
+    <TrinityCollectLicenses References="@(ReferenceCopyLocalPaths)" PackageRoot="$(NuGetPackageRoot)">
+      <Output TaskParameter="Files" ItemName="_TrinityLicense" />
+    </TrinityCollectLicenses>
+    <Copy SourceFiles="@(_TrinityLicense)" DestinationFiles="@(_TrinityLicense->'$(OutDir)licenses/%(LicenseName)')" SkipUnchangedFiles="true" />
+    <!-- Microsoft.Extensions.* declare MIT without shipping the text -->
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)build/licenses/Microsoft.Extensions-LICENSE.txt" DestinationFolder="$(OutDir)licenses" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
