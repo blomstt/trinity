@@ -5,7 +5,7 @@ using Brutal.Numerics;
 namespace Trinity.Editor.Scripting;
 
 /// <summary>
-/// The Script panel, Trinity's take on Godot's script editor: the project's scripts on the left, open files
+/// The Script panel, Trinity's built-in script editor: the project's scripts on the left, open files
 /// in tabs, problems underneath. Saving a script (Ctrl+S) checks it with the compiler, or, while the game
 /// runs, hot-reloads it into the game.
 /// </summary>

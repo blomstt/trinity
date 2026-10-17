@@ -114,7 +114,7 @@ The editor grows with each engine item: terrain painting with E5, physics shapes
 
 ### Scripts
 
-Like Godot: select an object, pick **Script > New script...** in the Inspector, and write its behaviour in C#:
+Select a node, pick **Script > New script...** in the Inspector, and write its behaviour in C#:
 
 ```csharp
 public sealed class Spin : Script

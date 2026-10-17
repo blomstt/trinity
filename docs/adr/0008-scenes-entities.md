@@ -4,7 +4,7 @@ Date: 2026-10-17. Status: accepted.
 
 ## Context
 
-E3 asks for entities and components, a Godot-like node hierarchy, scene files that nest other scenes as instances with per-instance overrides, and an editor that edits all of it with undo, while staying small and NativeAOT-safe. Before E3 a scene was a flat list of `Node` objects (model, transform, clip, script) saved as JSON. The full specification (entity identity, components, hierarchy, instancing, serialization, editor, scripting, runtime, tests, staged delivery) came from blomst on 2026-10-17.
+E3 asks for entities and components, a node hierarchy, scene files that nest other scenes as instances with per-instance overrides, and an editor that edits all of it with undo, while staying small and NativeAOT-safe. Before E3 a scene was a flat list of `Node` objects (model, transform, clip, script) saved as JSON. The full specification (entity identity, components, hierarchy, instancing, serialization, editor, scripting, runtime, tests, staged delivery) came from blomst on 2026-10-17.
 
 ## Decision
 

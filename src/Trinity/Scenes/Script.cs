@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace Trinity.Scenes;
 
 /// <summary>
-/// Behaviour attached to a <see cref="Scenes.Node"/>, like a Godot script:
+/// Behaviour attached to a <see cref="Scenes.Node"/>:
 /// <code>
 /// public sealed class Spin : Script
 /// {
@@ -19,7 +19,7 @@ namespace Trinity.Scenes;
 /// <c>Vector3</c> or <c>Node</c> (a reference to another node, kept across saves).
 /// <para>
 /// Order: when a scene starts, every script is created first, then <see cref="Ready"/> runs children
-/// before parents (as in Godot), so a parent's Ready sees its children ready. Updates run in the order
+/// before parents, so a parent's Ready sees its children ready. Updates run in the order
 /// scripts were created. <see cref="Destroyed"/> runs before the node goes; after that the script gets
 /// no more calls, and <see cref="Node"/> is no longer valid.
 /// </para>
