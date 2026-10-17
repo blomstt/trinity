@@ -164,13 +164,36 @@ public sealed unsafe class Renderer : IDisposable
         _shaders = shaders;
         var device = gpu.Device;
 
+        ShadowSampler = device.CreateSampler(
+            new VkSamplerCreateInfo
+            {
+                MagFilter = VkFilter.Linear,
+                MinFilter = VkFilter.Linear,
+                AddressModeU = VkSamplerAddressMode.ClampToEdge,
+                AddressModeV = VkSamplerAddressMode.ClampToEdge,
+                AddressModeW = VkSamplerAddressMode.ClampToEdge,
+                CompareEnable = true,
+                CompareOp = VkCompareOp.GreaterOrEqual, // reversed depth: lit when at least as close to the light as the caster
+            },
+            null
+        );
+        // The shadow map's comparison sampler is fixed in the layout: Metal (MoltenVK) can't take one through a descriptor
+        var shadowSampler = ShadowSampler;
+
         var all = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit;
         Span<VkDescriptorSetLayoutBinding> view =
         [
             new() { Binding = 0, DescriptorType = VkDescriptorType.UniformBuffer, DescriptorCount = 1, StageFlags = all },
             new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = all },
             new() { Binding = 2, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
-            new() { Binding = 3, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new()
+            {
+                Binding = 3,
+                DescriptorType = VkDescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+                StageFlags = VkShaderStageFlags.FragmentBit,
+                ImmutableSamplers = &shadowSampler,
+            },
             new() { Binding = 4, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = all },
         ];
         fixed (VkDescriptorSetLayoutBinding* b = view)
@@ -188,19 +211,6 @@ public sealed unsafe class Renderer : IDisposable
         _boneSetLayout = device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 1, Bindings = &bones }, null);
         var push = new VkPushConstantRange { StageFlags = all, Size = (ByteSize32)16 };
         _layout = device.CreatePipelineLayout([ViewSetLayout, Materials.SetLayout, _boneSetLayout, Sky.SetLayout], [push], null);
-        ShadowSampler = device.CreateSampler(
-            new VkSamplerCreateInfo
-            {
-                MagFilter = VkFilter.Linear,
-                MinFilter = VkFilter.Linear,
-                AddressModeU = VkSamplerAddressMode.ClampToEdge,
-                AddressModeV = VkSamplerAddressMode.ClampToEdge,
-                AddressModeW = VkSamplerAddressMode.ClampToEdge,
-                CompareEnable = true,
-                CompareOp = VkCompareOp.GreaterOrEqual, // reversed depth: lit when at least as close to the light as the caster
-            },
-            null
-        );
 
         ClampSampler = device.CreateSampler(
             new VkSamplerCreateInfo
@@ -725,7 +735,6 @@ public sealed unsafe class Renderer : IDisposable
         foreach (var p in _meshPipelines.Values.Concat(_shadowPipelines.Values).Concat(_blendPipelines.Values))
             device.DestroyPipeline(p, null);
         device.DestroyPipeline(_skyPipeline, null);
-        device.DestroySampler(ShadowSampler, null);
         Timer.Dispose();
         Sky.Dispose();
         Materials.Dispose();
@@ -740,5 +749,6 @@ public sealed unsafe class Renderer : IDisposable
         device.DestroyPipelineLayout(_layout, null);
         device.DestroyDescriptorSetLayout(ViewSetLayout, null);
         device.DestroyDescriptorSetLayout(_boneSetLayout, null);
+        device.DestroySampler(ShadowSampler, null); // after ViewSetLayout, which holds it as an immutable sampler
     }
 }

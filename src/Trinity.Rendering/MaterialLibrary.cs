@@ -111,14 +111,23 @@ public sealed unsafe class MaterialLibrary : IDisposable
         Span<VkDescriptorBindingFlags> flags =
         [
             0,
-            Bindless ? VkDescriptorBindingFlags.PartiallyBoundBit | VkDescriptorBindingFlags.VariableDescriptorCountBit : 0,
+            // Update-after-bind, so the array is held to the device's update-after-bind limits (see GraphicsDevice)
+            Bindless
+                ? VkDescriptorBindingFlags.PartiallyBoundBit | VkDescriptorBindingFlags.VariableDescriptorCountBit | VkDescriptorBindingFlags.UpdateAfterBindBit
+                : 0,
         ];
         fixed (VkDescriptorSetLayoutBinding* b = bindings)
         fixed (VkDescriptorBindingFlags* f = flags)
         {
             var flagInfo = new VkDescriptorSetLayoutBindingFlagsCreateInfo { BindingCount = 2, BindingFlags = f };
             SetLayout = device.CreateDescriptorSetLayout(
-                new VkDescriptorSetLayoutCreateInfo { Next = &flagInfo, BindingCount = 2, Bindings = b },
+                new VkDescriptorSetLayoutCreateInfo
+                {
+                    Next = &flagInfo,
+                    Flags = Bindless ? VkDescriptorSetLayoutCreateFlags.UpdateAfterBindPoolBit : 0,
+                    BindingCount = 2,
+                    Bindings = b,
+                },
                 null
             );
         }
@@ -130,7 +139,13 @@ public sealed unsafe class MaterialLibrary : IDisposable
         ];
         fixed (VkDescriptorPoolSize* s = sizes)
             _pool = device.CreateDescriptorPool(
-                new VkDescriptorPoolCreateInfo { MaxSets = GraphicsDevice.FramesInFlight, PoolSizeCount = 2, PoolSizes = s },
+                new VkDescriptorPoolCreateInfo
+                {
+                    Flags = Bindless ? VkDescriptorPoolCreateFlags.UpdateAfterBindBit : 0,
+                    MaxSets = GraphicsDevice.FramesInFlight,
+                    PoolSizeCount = 2,
+                    PoolSizes = s,
+                },
                 null
             );
         for (var i = 0; i < GraphicsDevice.FramesInFlight; i++)
