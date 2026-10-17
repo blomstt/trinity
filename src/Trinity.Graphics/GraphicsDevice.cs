@@ -135,14 +135,30 @@ public sealed unsafe class GraphicsDevice : IDisposable
         var limits12 = new VkPhysicalDeviceVulkan12Properties();
         var props2 = new VkPhysicalDeviceProperties2 { Next = &limits12 };
         PhysicalDevice.GetProperties2(ref props2);
-        // A combined image sampler counts as a sampler, a sampled image and a resource at once, and the
-        // frame's own few samplers (shadow map, HDR, sky tables) share the same per-stage limits
-        const int otherSamplers = 8;
-        var maxTextures = bindless
-            ? Math.Min(16384, Math.Min(limits12.MaxPerStageDescriptorUpdateAfterBindSampledImages,
-                Math.Min(limits12.MaxPerStageDescriptorUpdateAfterBindSamplers, limits12.MaxPerStageUpdateAfterBindResources)) - otherSamplers)
-            : Math.Min(64, Math.Min(limits.MaxPerStageDescriptorSampledImages,
-                Math.Min(limits.MaxPerStageDescriptorSamplers, limits.MaxPerStageResources)) - otherSamplers);
+        // A combined image sampler counts as a sampler, a sampled image and a resource at once, per stage and
+        // per pipeline layout. The frame's own bindings count against the same limits: a few samplers (shadow
+        // map, HDR, sky tables), and for resources also the view, sky and material buffers and the colour attachment.
+        const int frameSamplers = 8, frameResources = 16;
+        int[] textureLimits = bindless
+            ?
+            [
+                16384,
+                limits12.MaxPerStageDescriptorUpdateAfterBindSampledImages - frameSamplers,
+                limits12.MaxPerStageDescriptorUpdateAfterBindSamplers - frameSamplers,
+                limits12.MaxDescriptorSetUpdateAfterBindSampledImages - frameSamplers,
+                limits12.MaxDescriptorSetUpdateAfterBindSamplers - frameSamplers,
+                limits12.MaxPerStageUpdateAfterBindResources - frameResources,
+            ]
+            :
+            [
+                64,
+                limits.MaxPerStageDescriptorSampledImages - frameSamplers,
+                limits.MaxPerStageDescriptorSamplers - frameSamplers,
+                limits.MaxDescriptorSetSampledImages - frameSamplers,
+                limits.MaxDescriptorSetSamplers - frameSamplers,
+                limits.MaxPerStageResources - frameResources,
+            ];
+        var maxTextures = textureLimits.Min();
         Features = new GpuFeatures(
             bindless,
             maxTextures,

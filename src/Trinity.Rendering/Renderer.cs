@@ -735,7 +735,6 @@ public sealed unsafe class Renderer : IDisposable
         foreach (var p in _meshPipelines.Values.Concat(_shadowPipelines.Values).Concat(_blendPipelines.Values))
             device.DestroyPipeline(p, null);
         device.DestroyPipeline(_skyPipeline, null);
-        device.DestroySampler(ShadowSampler, null);
         Timer.Dispose();
         Sky.Dispose();
         Materials.Dispose();
@@ -750,5 +749,6 @@ public sealed unsafe class Renderer : IDisposable
         device.DestroyPipelineLayout(_layout, null);
         device.DestroyDescriptorSetLayout(ViewSetLayout, null);
         device.DestroyDescriptorSetLayout(_boneSetLayout, null);
+        device.DestroySampler(ShadowSampler, null); // after ViewSetLayout, which holds it as an immutable sampler
     }
 }
