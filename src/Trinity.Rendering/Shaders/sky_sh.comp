@@ -6,11 +6,12 @@
 
 #include "atmosphere.glsl"
 
-layout(local_size_x = 256) in;
+// 128 threads: Metal pads each shared vec3 to 16 bytes, and 256 x 9 of them (36 KB) is over Apple's 32 KB
+layout(local_size_x = 128) in;
 layout(set = 0, binding = 2) uniform sampler2D sky;
 layout(std430, set = 0, binding = 3) writeonly buffer SH { vec4 coefficients[9]; } sh;
 
-shared vec3 partial[256][9];
+shared vec3 partial[128][9];
 
 void basis(vec3 d, out float y[9]) {
     y[0] = 0.282095;
@@ -28,9 +29,9 @@ void main() {
     uint id = gl_LocalInvocationID.x;
     vec3 sum[9];
     for (int k = 0; k < 9; k++) sum[k] = vec3(0.0);
-    // A uniform grid of directions over the sphere (Fibonacci), 16 per thread
+    // A uniform grid of directions over the sphere (Fibonacci), 32 per thread
     const uint SAMPLES = 4096u;
-    for (uint i = id; i < SAMPLES; i += 256u) {
+    for (uint i = id; i < SAMPLES; i += 128u) {
         float z = 1.0 - (float(i) + 0.5) * 2.0 / float(SAMPLES);
         float r = sqrt(max(0.0, 1.0 - z * z));
         float phi = float(i) * 2.39996323;
@@ -42,7 +43,7 @@ void main() {
     }
     for (int k = 0; k < 9; k++) partial[id][k] = sum[k];
     barrier();
-    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    for (uint stride = 64u; stride > 0u; stride >>= 1u) {
         if (id < stride)
             for (int k = 0; k < 9; k++) partial[id][k] += partial[id + stride][k];
         barrier();
