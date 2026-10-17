@@ -32,7 +32,7 @@ sealed partial class EditorApp : IDisposable
     SceneLibrary _library;
     ImTextureRef? _viewportTexture;
     int _viewportWidth = 1280, _viewportHeight = 720;
-    bool _layoutBuilt;
+    bool _layoutBuilt, _resetLayout;
     bool _showHierarchy = true, _showInspector = true, _showLog = true, _showStats = true, _showEnvironment = true;
     ImGuiID _inspectorDock;
     int _dragAxis = -1;
@@ -56,7 +56,7 @@ sealed partial class EditorApp : IDisposable
             Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
             "trinity-editor"
         );
-        _ui = new ImGuiHost(_window, _gpu, config, "editor-layout.ini");
+        _ui = new ImGuiHost(_window, _gpu, config, "editor-layout-2.ini");
         _scripts = new ScriptPanel(project, _ui.Mono);
         _runner.Output += _scripts.Checker.Feed;
         _scripts.Saved += () =>
@@ -233,6 +233,14 @@ sealed partial class EditorApp : IDisposable
     void DrawUi()
     {
         var dock = ImGui.DockSpaceOverViewport(default, ImGui.GetMainViewport());
+        if (_resetLayout)
+        {
+            // View > Reset layout: back to the default arrangement
+            _resetLayout = false;
+            ImGui.Internal.DockBuilderRemoveNodeDockedWindows(dock, true);
+            ImGui.Internal.DockBuilderRemoveNodeChildNodes(dock);
+            BuildDefaultLayout(dock);
+        }
         if (!_layoutBuilt)
         {
             _layoutBuilt = true;
@@ -269,21 +277,21 @@ sealed partial class EditorApp : IDisposable
             _scene.CloseEdit();
     }
 
-    /// <summary>Scene above FileSystem and History on the left, Inspector right, Log below, viewport in the middle.</summary>
+    /// <summary>Scene above History on the left, Inspector right, FileSystem (wide, for its three columns) and Log below, viewport in the middle.</summary>
     static void BuildDefaultLayout(ImGuiID dock)
     {
         ImGui.Internal.DockBuilderSplitNode(dock, ImGuiDir.Left, 0.19f, out var left, out var rest);
         ImGui.Internal.DockBuilderSplitNode(rest, ImGuiDir.Right, 0.25f, out var right, out var middle);
-        ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.24f, out var bottom, out var centre);
+        ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.34f, out var bottom, out var centre);
         ImGui.Internal.DockBuilderSplitNode(right, ImGuiDir.Down, 0.30f, out var rightBottom, out var rightTop);
-        ImGui.Internal.DockBuilderSplitNode(left, ImGuiDir.Down, 0.5f, out var leftBottom, out var leftTop);
+        ImGui.Internal.DockBuilderSplitNode(left, ImGuiDir.Down, 0.35f, out var leftBottom, out var leftTop);
         ImGui.Internal.DockBuilderDockWindow(HierarchyPanel, leftTop);
         ImGui.Internal.DockBuilderDockWindow(HistoryPanel, leftBottom);
-        ImGui.Internal.DockBuilderDockWindow(FileSystemPanel, leftBottom);
         ImGui.Internal.DockBuilderDockWindow(EnvironmentPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(InspectorPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(StatsPanel, rightBottom);
         ImGui.Internal.DockBuilderDockWindow(LogPanel, bottom);
+        ImGui.Internal.DockBuilderDockWindow(FileSystemPanel, bottom);
         ImGui.Internal.DockBuilderDockWindow(ScriptPanel.Title, centre);
         ImGui.Internal.DockBuilderDockWindow(ViewportPanel, centre);
         ImGui.Internal.DockBuilderFinish(dock);
@@ -340,6 +348,7 @@ sealed partial class EditorApp : IDisposable
             ImGui.MenuItem(InspectorPanel, default, ref _showInspector);
             ImGui.MenuItem(FileSystemPanel, default, ref _showFileSystem);
             ImGui.MenuItem(HistoryPanel, default, ref _showHistory);
+            if (ImGui.MenuItem("Reset layout")) _resetLayout = true;
             ImGui.MenuItem(LogPanel, default, ref _showLog);
             ImGui.MenuItem(StatsPanel, default, ref _showStats);
             ImGui.MenuItem(EnvironmentPanel, default, ref _showEnvironment);
@@ -438,6 +447,9 @@ sealed partial class EditorApp : IDisposable
         if (io.WantTextInput || _scripts.HasFocus)
             return;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.S)) SaveScene();
+        // The FileSystem dock has its own keys (d, Delete, ctrl+d...); scene shortcuts wait while it has focus
+        if (_fsFocused)
+            return;
         if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.N)) NewScene();
         if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.N)) _scene.CreateNode("Node", _scene.Primary);
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.Q)) _window.ShouldClose = true;
@@ -936,6 +948,7 @@ sealed partial class EditorApp : IDisposable
     {
         _runner.Dispose();
         _gpu.WaitIdle();
+        ReleaseImages();
         _view.Dispose();
         _ui.Dispose();
         _gpu.Dispose();
