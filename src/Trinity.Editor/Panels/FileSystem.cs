@@ -11,14 +11,20 @@ using Trinity.Scenes;
 namespace Trinity.Editor;
 
 /// <summary>
-/// The FileSystem dock, laid out and driven like yazi: three columns (the parent folder, the folder
-/// you're in, and a preview of what the cursor is on: a folder's contents, an image, code with colours,
-/// a scene's nodes or a model's numbers), a header with the path, and a status line. It works from the
-/// keyboard with yazi's keys (~ or the ? button lists them): hjkl to move, Space and v to select, y x p
-/// to copy, cut and paste, d to trash, a to create, r to rename, / and f to find and filter, comma to
-/// sort. The mouse works too: click, double-click to open, drag a model or scene into the viewport, onto a
-/// node or onto an asset field, and right-click for a menu. Moving and renaming update every scene that
-/// refers to the file; deleting moves to the desktop trash.
+/// The FileSystem dock: a content browser with yazi's preview and keys.
+/// <list type="bullet">
+/// <item>Toolbar: Add (new folder, scene, script) and Import, Save All, back, forward and up, and the path
+/// as buttons (each one goes there; the arrow after it lists its folders).</item>
+/// <item>Left: the project's folders as a tree, with a search box. Middle: the folder's contents as tiles
+/// (with thumbnails) or a list (with sizes and dates), a type filter and a search that looks through
+/// subfolders. Right: a preview of what's selected (yazi's): folder contents, an image, code in the script
+/// editor's colours, a scene's nodes, a model's numbers. Bottom: the item count and View Options.</item>
+/// <item>Mouse: click selects (Ctrl adds, Shift a range), double-click opens, drag into the viewport, onto
+/// a node or an asset field, or onto a folder to move; right-click for everything.</item>
+/// <item>Keys: arrows, Enter, Backspace, F2, Delete, Ctrl+C/X/V, Ctrl+A, Ctrl+F; and yazi's (hjkl, gg G,
+/// H L, Space v, y x p, d, a, r, / n N, f, ., comma sorts, cc, m '). ~ or the ? button lists them.</item>
+/// </list>
+/// Moving and renaming update every scene that refers to the file; deleting moves to the desktop trash.
 /// Beside it, the History dock lists the undo steps; click one to go back (or forward) to it.
 /// </summary>
 sealed partial class EditorApp
@@ -26,35 +32,41 @@ sealed partial class EditorApp
     const string FileSystemPanel = "FileSystem", HistoryPanel = "History";
     const string AssetPayload = "trinity-asset";
 
-    /// <summary>The column widths, as yazi's ratio: parent, current, preview.</summary>
-    static readonly float[] FsRatio = [2, 2, 4];
-    /// <summary>Rows kept between the cursor and the column's edge while moving (yazi's scrolloff).</summary>
-    const int FsScrolloff = 5;
-
     sealed record FsEntry(string Path, string Name, bool Folder, long Size, DateTime Modified, bool Hidden);
 
     enum FsSort { Natural, Alphabetical, Modified, Extension, Size }
-    enum FsInput { None, Find, FindBack, Filter, Create, Rename }
+    enum FsInput { None, Find, FindBack, Create, Rename }
+    enum FsView { Tiles, List }
+    enum FsKind { All, Folders, Scenes, Models, Images, Scripts, Other }
 
     string _fsDir = "";
-    readonly Dictionary<string, string> _fsCursorIn = []; // folder -> name the cursor was on there
+    readonly Dictionary<string, string> _fsCursorIn = []; // folder -> name of the current item there
     readonly Dictionary<string, (double At, List<FsEntry> Entries)> _fsListings = [];
     readonly HashSet<string> _fsSelected = [];
+    readonly HashSet<string> _fsTreeOpen = [""];
     (List<string> Paths, bool Cut)? _fsYank;
     readonly Stack<string> _fsBack = new(), _fsForward = new();
     FsSort _fsSort = FsSort.Natural;
-    bool _fsReverse, _fsShowHidden, _fsVisual, _fsScrollToCursor = true, _fsFocused;
-    int _fsVisualAnchor;
-    string _fsFilter = "", _fsFind = "";
+    FsView _fsView = FsView.Tiles;
+    FsKind _fsKind = FsKind.All;
+    float _fsTileSize = 72;
+    bool _fsReverse, _fsShowHidden, _fsShowPreview = true, _fsVisual, _fsScrollToCursor = true, _fsFocused, _fsFocusSearch;
+    int _fsVisualAnchor, _fsColumns = 1;
+    string _fsFind = "";
+    readonly ImInputString _fsSearch = new(128), _fsPathSearch = new(128);
     FsInput _fsInput;
-    bool _fsInputOpen, _fsBookmarksOpen;
+    bool _fsInputOpen, _fsBookmarksOpen, _fsImportOpen, _fsViewLoaded;
     readonly ImInputString _fsInputEdit = new(256);
+    readonly FolderPicker _fsImport = new();
     char _fsPending; // the first key of a two-key command (g, c, comma)
     List<string> _favorites = [];
     string _draggedAsset = "";
     bool _showFileSystem = true, _showHistory = true;
     (List<string> Paths, List<string> UsedBy)? _fsDelete;
     bool _fsHelp;
+
+    static readonly float4 Accent = ImGuiHost.Color(0.88f, 0.66f, 0.36f);
+    static readonly float4 AccentDim = ImGuiHost.Color(0.43f, 0.33f, 0.19f);
 
     // --- Listing --------------------------------------------------------------------------------------
 
@@ -88,12 +100,36 @@ sealed partial class EditorApp
 
     void FsRefresh() => _fsListings.Clear();
 
-    /// <summary>What a column shows: sorted as set (folders first), hidden files only when shown, filtered for the current folder.</summary>
-    List<FsEntry> Visible(string folder)
+    static FsKind KindOf(FsEntry e) =>
+        e.Folder ? FsKind.Folders
+        : e.Name.EndsWith(".scene.json", StringComparison.Ordinal) ? FsKind.Scenes
+        : IsModel(e.Name) ? FsKind.Models
+        : IsImage(e.Name) ? FsKind.Images
+        : e.Name.EndsWith(".cs", StringComparison.Ordinal) ? FsKind.Scripts
+        : FsKind.Other;
+
+    static string KindLabel(FsEntry e) => KindOf(e) switch
     {
-        IEnumerable<FsEntry> entries = Listing(folder).Where(e => _fsShowHidden || !e.Hidden);
-        if (folder == _fsDir && _fsFilter.Length > 0)
-            entries = entries.Where(e => e.Name.Contains(_fsFilter, StringComparison.OrdinalIgnoreCase));
+        FsKind.Folders => "Folder",
+        FsKind.Scenes => "Scene",
+        FsKind.Models => "Model",
+        FsKind.Images => "Image",
+        FsKind.Scripts => "Script",
+        _ => Path.GetExtension(e.Name).TrimStart('.').ToUpperInvariant() is { Length: > 0 } ext ? ext : "File",
+    };
+
+    /// <summary>
+    /// What the content view shows: a folder's entries, or with a search, the matching files and folders
+    /// in it and everything under it; then the type filter, hidden files only when shown, and the sort
+    /// (folders first).
+    /// </summary>
+    List<FsEntry> Visible(string folder, bool forContent = true)
+    {
+        var search = forContent ? _fsSearch.ToString().Trim() : "";
+        IEnumerable<FsEntry> entries = search.Length > 0 ? Everything(folder, 3000).Where(e => e.Name.Contains(search, StringComparison.OrdinalIgnoreCase)) : Listing(folder);
+        entries = entries.Where(e => _fsShowHidden || !e.Hidden);
+        if (forContent && _fsKind != FsKind.All)
+            entries = entries.Where(e => KindOf(e) == _fsKind);
         var list = entries.ToList();
         list.Sort((a, b) =>
         {
@@ -112,7 +148,27 @@ sealed partial class EditorApp
         return list;
     }
 
+    /// <summary>Everything under a folder (for searching), up to a limit.</summary>
+    IEnumerable<FsEntry> Everything(string folder, int limit)
+    {
+        var queue = new Queue<string>([folder]);
+        var n = 0;
+        while (queue.Count > 0 && n < limit)
+            foreach (var e in Listing(queue.Dequeue()))
+            {
+                if (e.Folder && (_fsShowHidden || !e.Hidden))
+                    queue.Enqueue(e.Path);
+                if (++n > limit)
+                    yield break;
+                yield return e;
+            }
+    }
+
     static string Extension(string name) => name.EndsWith(".scene.json", StringComparison.Ordinal) ? ".scene.json" : Path.GetExtension(name);
+
+    /// <summary>A name without the extension its type label already says (rock.glb shows as rock, Model).</summary>
+    static string DisplayName(FsEntry e) =>
+        e.Folder || KindOf(e) is FsKind.Other || e.Hidden ? e.Name : e.Name[..^Extension(e.Name).Length];
 
     /// <summary>Natural order, case-sensitive (as yazi's sort_by = "natural"): "rock 2" before "rock 10".</summary>
     internal static int Natural(string a, string b)
@@ -144,28 +200,31 @@ sealed partial class EditorApp
 
     int CursorIn(List<FsEntry> entries, string folder)
     {
-        if (_fsCursorIn.TryGetValue(folder, out var name) && entries.FindIndex(e => e.Name == name) is var i and >= 0)
+        if (_fsCursorIn.TryGetValue(folder, out var path) && entries.FindIndex(e => e.Path == path) is var i and >= 0)
             return i;
         return 0;
     }
 
-    void SetCursor(List<FsEntry> entries, int index)
+    void SetCursor(List<FsEntry> entries, int index, bool extend = false)
     {
         if (entries.Count == 0)
             return;
         index = Math.Clamp(index, 0, entries.Count - 1);
-        _fsCursorIn[_fsDir] = entries[index].Name;
+        var before = CursorIn(entries, _fsDir);
+        _fsCursorIn[_fsDir] = entries[index].Path;
         _fsScrollToCursor = true;
-        if (_fsVisual)
+        if (_fsVisual || extend)
         {
-            // Visual mode: everything between where it started and the cursor is selected
+            // A range: everything between where it started and the cursor
+            if (!_fsVisual && _fsSelected.Count == 0)
+                _fsVisualAnchor = before;
             _fsSelected.Clear();
             for (var i = Math.Min(_fsVisualAnchor, index); i <= Math.Max(_fsVisualAnchor, index); i++)
                 _fsSelected.Add(entries[i].Path);
         }
     }
 
-    /// <summary>Goes into a folder (remembering where we were, for H and L).</summary>
+    /// <summary>Goes into a folder (remembering where we were, for back and forward).</summary>
     void Cd(string folder, bool remember = true)
     {
         if (folder == _fsDir || !Directory.Exists(_project.Absolute(folder)))
@@ -176,23 +235,43 @@ sealed partial class EditorApp
             _fsForward.Clear();
         }
         _fsDir = folder;
-        _fsFilter = "";
+        _fsSearch.SetValue("".AsSpan());
+        _fsSelected.Clear();
         _fsVisual = false;
         _fsScrollToCursor = true;
+        // The tree shows where we are
+        for (var p = folder; p.Length > 0; p = Parent(p))
+            _fsTreeOpen.Add(Parent(p));
+    }
+
+    void Back()
+    {
+        if (_fsBack.Count == 0)
+            return;
+        _fsForward.Push(_fsDir);
+        Cd(_fsBack.Pop(), remember: false);
+    }
+
+    void Forward()
+    {
+        if (_fsForward.Count == 0)
+            return;
+        _fsBack.Push(_fsDir);
+        Cd(_fsForward.Pop(), remember: false);
     }
 
     /// <summary>Shows a project file in the FileSystem dock (--browse, for checking without a person).</summary>
     public void Browse(string path) => Reveal(SceneLibrary.Normalize(path).Trim('/'));
 
-    /// <summary>Shows a file or folder: goes to its folder with the cursor on it.</summary>
+    /// <summary>Shows a file or folder: goes to its folder with it as the current item.</summary>
     void Reveal(string path)
     {
         Cd(Parent(path));
-        _fsCursorIn[Parent(path)] = Path.GetFileName(path);
+        _fsCursorIn[Parent(path)] = path;
         _fsScrollToCursor = true;
     }
 
-    /// <summary>What an operation acts on: the selection, or the entry under the cursor.</summary>
+    /// <summary>What an operation acts on: the selection, or the current item.</summary>
     List<string> Targets(FsEntry? cursor) =>
         _fsSelected.Count > 0 ? [.. _fsSelected] : cursor != null ? [cursor.Path] : [];
 
@@ -200,6 +279,8 @@ sealed partial class EditorApp
 
     void FileSystem()
     {
+        if (!_fsViewLoaded)
+            LoadView();
         if (!ImGui.Begin(FileSystemPanel, ref _showFileSystem))
         {
             _fsFocused = false;
@@ -219,183 +300,468 @@ sealed partial class EditorApp
         var cursorIndex = CursorIn(entries, _fsDir);
         var cursor = entries.Count > 0 ? entries[cursorIndex] : null;
 
-        FsHeader();
+        Toolbar();
         var avail = ImGui.GetContentRegionAvail();
-        var statusHeight = ImGui.GetFrameHeight() + 2;
-        var height = Math.Max(40, avail.Y - statusHeight - ImGui.GetStyle().ItemSpacing.Y);
-        var total = FsRatio.Sum();
-        const float spacing = 6f;
-        var width = avail.X - spacing * 2;
+        var bottom = ImGui.GetFrameHeight() + 4;
+        var height = Math.Max(60, avail.Y - bottom - ImGui.GetStyle().ItemSpacing.Y);
+        const float gap = 6;
+        var treeWidth = Math.Clamp(avail.X * 0.18f, 150, 280);
+        var preview = _fsShowPreview && avail.X > 640;
+        var previewWidth = preview ? Math.Clamp(avail.X * 0.30f, 220, 520) : 0;
+        var contentWidth = avail.X - treeWidth - previewWidth - gap * (preview ? 2 : 1);
 
-        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new float2(0, 1));
-        ParentColumn(width * FsRatio[0] / total, height);
-        ImGui.SameLine(0, spacing);
-        CurrentColumn(entries, cursorIndex, width * FsRatio[1] / total, height);
-        ImGui.SameLine(0, spacing);
-        PreviewColumn(cursor, width * FsRatio[2] / total, height);
-        ImGui.PopStyleVar();
+        FolderTree(treeWidth, height);
+        ImGui.SameLine(0, gap);
+        ContentView(entries, cursorIndex, contentWidth, height);
+        if (preview)
+        {
+            ImGui.SameLine(0, gap);
+            PreviewPane(cursor, previewWidth, height);
+        }
+        BottomBar(entries, cursor);
 
-        FsStatus(entries, cursorIndex, cursor);
         FsInputBox(entries);
         Bookmarks();
+        ImportDialog();
         FsConfirmDelete();
         FsHelpWindow();
         ImGui.End();
     }
 
-    void FsHeader()
+    void Toolbar()
     {
-        var path = (_project.Name + "/" + _fsDir).TrimEnd('/');
-        ImGui.TextColored(Icons.FolderColor, path);
-        var notes = new List<string>();
-        if (_fsFilter.Length > 0) notes.Add($"filter: {_fsFilter}");
-        if (_fsFind.Length > 0) notes.Add($"find: {_fsFind}");
-        if (_fsYank is { } yank) notes.Add($"{yank.Paths.Count} {(yank.Cut ? "cut" : "yanked")}");
-        if (_fsSelected.Count > 0) notes.Add($"{_fsSelected.Count} selected");
-        var right = string.Join("   ", notes);
-        if (right.Length > 0)
+        // Add and Import, Save All
+        ImGui.PushStyleColor(ImGuiCol.Button, AccentDim);
+        if (Icons.TextButton("Add", Icon.Plus, 0, ImGuiHost.Color(1, 1, 1)))
+            ImGui.OpenPopup("fs-add");
+        ImGui.PopStyleColor();
+        if (ImGui.BeginPopup("fs-add"))
         {
-            ImGui.SameLine(Math.Max(ImGui.GetCursorPosX() + 20, ImGui.GetWindowWidth() - ImGui.CalcTextSize(right).X - 40));
-            ImGui.TextDisabled(right);
+            NewItems();
+            ImGui.Separator();
+            if (ImGui.MenuItem("Import files...")) StartImport();
+            ImGui.EndPopup();
+        }
+        ImGui.SameLine();
+        if (Icons.TextButton("Import", Icon.Import))
+            StartImport();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Copy files from elsewhere into this folder");
+        ImGui.SameLine();
+        if (Icons.TextButton("Save All", Icon.Save))
+        {
+            SaveScene();
+            _scripts.SaveAll();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Save the scene and every open script");
+
+        // Back, forward, up
+        ImGui.SameLine(0, 16);
+        ImGui.BeginDisabled(_fsBack.Count == 0);
+        if (Icons.Button("back", Icon.Back, Icons.FileColor, "Back (Alt+Left, H)")) Back();
+        ImGui.EndDisabled();
+        ImGui.SameLine(0, 2);
+        ImGui.BeginDisabled(_fsForward.Count == 0);
+        if (Icons.Button("forward", Icon.Forward, Icons.FileColor, "Forward (Alt+Right, L)")) Forward();
+        ImGui.EndDisabled();
+        ImGui.SameLine(0, 2);
+        ImGui.BeginDisabled(_fsDir.Length == 0);
+        if (Icons.Button("up", Icon.Up, Icons.FileColor, "Up a folder (Backspace, h)")) Leave();
+        ImGui.EndDisabled();
+
+        // The path: each part goes there; the arrow after it lists the folders in it
+        ImGui.SameLine(0, 12);
+        Icons.Inline(Icon.Folder, Icons.FolderColor);
+        var parts = new List<(string Label, string Path)> { (_project.Name, "") };
+        var acc = "";
+        foreach (var part in _fsDir.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            parts.Add((part, acc = Join(acc, part)));
+        foreach (var (label, path) in parts)
+        {
+            ImGui.SameLine(0, 4);
+            ImGui.PushStyleColor(ImGuiCol.Button, float4.Zero);
+            if (ImGui.Button(label + "##crumb" + path))
+                Cd(path);
+            FolderDropTarget(path);
+            ImGui.SameLine(0, 0);
+            if (ImGui.Button(">##sub" + path))
+                ImGui.OpenPopup("sub" + path);
+            ImGui.PopStyleColor();
+            if (ImGui.BeginPopup("sub" + path))
+            {
+                var folders = Visible(path, forContent: false).Where(e => e.Folder).ToList();
+                if (folders.Count == 0)
+                    ImGui.TextDisabled("No folders");
+                foreach (var f in folders)
+                {
+                    Icons.Inline(Icon.Folder, Icons.FolderColor);
+                    ImGui.SameLine();
+                    if (ImGui.Selectable(f.Name, f.Path == _fsDir))
+                        Cd(f.Path);
+                }
+                ImGui.EndPopup();
+            }
         }
         ImGui.SameLine(ImGui.GetWindowWidth() - 28);
         if (ImGui.SmallButton("?"))
             _fsHelp = true;
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Keys (~)");
+            ImGui.SetTooltip("Keys and mouse (~)");
     }
 
-    void ParentColumn(float width, float height)
+    void FolderTree(float width, float height)
     {
-        ImGui.BeginChild("parent", new float2(width, height));
-        if (_fsDir.Length == 0)
+        ImGui.BeginChild("tree", new float2(width, height), ImGuiChildFlags.Borders);
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputTextWithHint("##paths", "Search folders", _fsPathSearch, ImGuiInputTextFlags.EscapeClearsAll);
+        var filter = _fsPathSearch.ToString().Trim();
+        HashSet<string>? shown = null;
+        if (filter.Length > 0)
         {
-            // At the top: the project itself
-            FsRow(new FsEntry("", _project.Name, true, 0, default, false), "p", width, cursor: true, dim: true);
+            // Folders whose names match, and the folders above them
+            shown = [""];
+            foreach (var e in Everything("", 5000))
+                if (e.Folder && e.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+                    for (var p = e.Path; p.Length > 0 && shown.Add(p); p = Parent(p)) { }
         }
-        else
-        {
-            var parent = Parent(_fsDir);
-            foreach (var e in Visible(parent))
-                if (FsRow(e, "p", width, cursor: e.Path == _fsDir, dim: true) is var click and not 0)
-                {
-                    if (e.Folder) Cd(e.Path);
-                    else Reveal(e.Path);
-                    if (click == 2 && !e.Folder) ActivateFile(e.Path);
-                }
-        }
+        TreeFolder(new FsEntry("", _project.Name, true, 0, default, false), shown);
         ImGui.EndChild();
     }
 
-    void CurrentColumn(List<FsEntry> entries, int cursorIndex, float width, float height)
+    void TreeFolder(FsEntry folder, HashSet<string>? shown)
     {
-        ImGui.BeginChild("current", new float2(width, height));
+        var children = Visible(folder.Path, forContent: false).Where(e => e.Folder && (shown == null || shown.Contains(e.Path))).ToList();
+        var flags = ImGuiTreeNodeFlags.OpenOnArrow | ImGuiTreeNodeFlags.SpanAvailWidth | ImGuiTreeNodeFlags.AllowOverlap;
+        if (children.Count == 0)
+            flags |= ImGuiTreeNodeFlags.Leaf;
+        if (folder.Path == _fsDir)
+            flags |= ImGuiTreeNodeFlags.Selected;
+        ImGui.SetNextItemOpen(shown != null || _fsTreeOpen.Contains(folder.Path));
+        ImGui.PushID("t" + folder.Path);
+        var selected = folder.Path == _fsDir;
+        if (selected)
+            ImGui.PushStyleColor(ImGuiCol.Header, AccentDim);
+        var open = ImGui.TreeNodeEx("        " + folder.Name, flags);
+        if (selected)
+            ImGui.PopStyleColor();
+        var min = ImGui.GetItemRectMin();
+        var size = ImGui.GetTextLineHeight();
+        Icons.Draw(ImGui.GetWindowDrawList(), open && children.Count > 0 ? Icon.FolderOpen : Icon.Folder,
+            new float2(min.X + ImGui.GetTreeNodeToLabelSpacing() + 2, min.Y + (ImGui.GetItemRectMax().Y - min.Y - size) / 2), size, Icons.FolderColor);
+        if (ImGui.IsItemToggledOpen())
+        {
+            if (open) _fsTreeOpen.Add(folder.Path);
+            else _fsTreeOpen.Remove(folder.Path);
+        }
+        else if (ImGui.IsItemClicked())
+            Cd(folder.Path);
+        FolderDropTarget(folder.Path);
+        if (folder.Path.Length > 0 && ImGui.BeginPopupContextItem("menu"))
+        {
+            FileMenu(folder);
+            ImGui.EndPopup();
+        }
+        if (open)
+        {
+            foreach (var c in children)
+                TreeFolder(c, shown);
+            ImGui.TreePop();
+        }
+        ImGui.PopID();
+    }
+
+    void ContentView(List<FsEntry> entries, int cursorIndex, float width, float height)
+    {
+        // A group keeps the search row and the items in this column (lines would otherwise start at the dock's edge)
+        ImGui.BeginGroup();
+        // Filters and search, as the content browser's
+        if (ImGui.Button((_fsKind == FsKind.All ? "Filters" : _fsKind.ToString()) + "##filters"))
+            ImGui.OpenPopup("fs-filters");
+        if (ImGui.BeginPopup("fs-filters"))
+        {
+            foreach (var kind in Enum.GetValues<FsKind>())
+                if (ImGui.MenuItem(kind == FsKind.All ? "Everything" : kind.ToString(), default, _fsKind == kind))
+                    _fsKind = kind;
+            ImGui.EndPopup();
+        }
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(width - ImGui.GetItemRectSize().X - 8);
+        if (_fsFocusSearch)
+        {
+            ImGui.SetKeyboardFocusHere();
+            _fsFocusSearch = false;
+        }
+        var searchLabel = _fsDir.Length == 0 ? "Search " + _project.Name : "Search " + Path.GetFileName(_fsDir);
+        if (ImGui.InputTextWithHint("##search", searchLabel + " and its folders (Ctrl+F)", _fsSearch, ImGuiInputTextFlags.EscapeClearsAll))
+            _fsScrollToCursor = true;
+
+        var boxHeight = height - ImGui.GetFrameHeight() - ImGui.GetStyle().ItemSpacing.Y;
+        ImGui.BeginChild("content", new float2(width, boxHeight), ImGuiChildFlags.Borders);
         if (entries.Count == 0)
-            ImGui.TextDisabled(_fsFilter.Length > 0 ? "  Nothing matches the filter" : "  Empty folder (a creates)");
+            ImGui.TextDisabled(_fsSearch.IsEmpty && _fsKind == FsKind.All ? "This folder is empty. Add or Import puts things here." : "Nothing matches.");
+        var searching = !_fsSearch.IsEmpty;
+        if (_fsView == FsView.Tiles)
+            Tiles(entries, cursorIndex, searching);
+        else
+            ListRows(entries, cursorIndex, searching);
+
+        // The space after the items: click clears the selection, drop moves here, right-click adds
+        var space = ImGui.GetContentRegionAvail();
+        if (space.Y > 4)
+        {
+            ImGui.InvisibleButton("##space", new float2(Math.Max(1, space.X), space.Y));
+            if (ImGui.IsItemClicked())
+                _fsSelected.Clear();
+            FolderDropTarget(_fsDir);
+            if (ImGui.BeginPopupContextItem("space"))
+            {
+                NewItems();
+                if (ImGui.MenuItem("Import files...")) StartImport();
+                if (ImGui.MenuItem("Paste", "Ctrl+V", false, _fsYank != null)) Paste();
+                ImGui.EndPopup();
+            }
+        }
+        ImGui.EndChild();
+        ImGui.EndGroup();
+    }
+
+    /// <summary>Handles a click on an item: plain selects it alone, Ctrl adds or removes it, Shift selects the range to it; a double-click opens it.</summary>
+    void Clicked(List<FsEntry> entries, int index, int click)
+    {
+        var io = ImGui.GetIO();
+        var e = entries[index];
+        if (io.KeyShift)
+            SetCursor(entries, index, extend: true);
+        else if (io.KeyCtrl)
+        {
+            var current = entries[CursorIn(entries, _fsDir)].Path;
+            if (_fsSelected.Count == 0)
+                _fsSelected.Add(current); // the item that was current joins the selection
+            if (!_fsSelected.Remove(e.Path))
+                _fsSelected.Add(e.Path);
+            _fsCursorIn[_fsDir] = e.Path;
+            _fsVisualAnchor = index;
+        }
+        else
+        {
+            _fsSelected.Clear();
+            _fsCursorIn[_fsDir] = e.Path;
+            _fsVisualAnchor = index;
+        }
+        if (click == 2)
+            Open(e);
+    }
+
+    void Tiles(List<FsEntry> entries, int cursorIndex, bool searching)
+    {
+        var style = ImGui.GetStyle();
+        var line = ImGui.GetTextLineHeight();
+        var tileWidth = _fsTileSize + 24;
+        var tileHeight = _fsTileSize + line * 2 + 18;
+        const float spacing = 8;
+        var columns = Math.Max(1, (int)((ImGui.GetContentRegionAvail().X + spacing) / (tileWidth + spacing)));
+        _fsColumns = columns;
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new float2(spacing, spacing));
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (i % columns != 0)
+                ImGui.SameLine();
+            var e = entries[i];
+            var p = ImGui.GetCursorScreenPos();
+            ImGui.PushID("tile" + e.Path);
+            var clicked = ImGui.InvisibleButton("##tile", new float2(tileWidth, tileHeight));
+            var hovered = ImGui.IsItemHovered();
+            var dl = ImGui.GetWindowDrawList();
+            var end = new float2(p.X + tileWidth, p.Y + tileHeight);
+            var current = i == cursorIndex;
+            var selected = _fsSelected.Contains(e.Path);
+            dl.AddRectFilled(p, end, ImGui.GetColorU32(ImGuiHost.Color(0.11f, 0.12f, 0.15f)), 6);
+            if (selected || current && _fsSelected.Count == 0)
+                dl.AddRectFilled(p, end, ImGui.GetColorU32(AccentDim), 6);
+            else if (hovered)
+                dl.AddRectFilled(p, end, ImGui.GetColorU32(ImGuiCol.HeaderHovered, 0.7f), 6);
+            if (current)
+                dl.AddRect(p, end, ImGui.GetColorU32(Accent), 6, default, 2);
+
+            // The picture: a thumbnail for images, otherwise the kind's icon
+            var art = new float2(p.X + 12, p.Y + 8);
+            var artEnd = new float2(art.X + _fsTileSize, art.Y + _fsTileSize);
+            if (IsImage(e.Name) && Thumbnail(e, 160) is { } thumb)
+            {
+                var (tw, th) = (thumb.Texture!.Width, thumb.Texture.Height);
+                var scale = Math.Min(_fsTileSize / tw, _fsTileSize / th);
+                var w = tw * scale;
+                var h = th * scale;
+                var at = new float2(art.X + (_fsTileSize - w) / 2, art.Y + (_fsTileSize - h) / 2);
+                dl.AddImageRounded(thumb.Ref!.Value, at, new float2(at.X + w, at.Y + h), float2.Zero, float2.One, ImGui.GetColorU32(ImGuiHost.Color(1, 1, 1)), 4);
+            }
+            else
+            {
+                var (icon, color) = e.Folder ? (Icon.Folder, Icons.FolderColor) : Icons.ForFile(e.Name);
+                var iconSize = _fsTileSize * 0.62f;
+                Icons.Draw(dl, icon, new float2(art.X + (_fsTileSize - iconSize) / 2, art.Y + (_fsTileSize - iconSize) / 2), iconSize, color);
+            }
+            YankMarker(dl, e, new float2(end.X - 12, p.Y + 10));
+
+            // The name (up to two lines) and the kind
+            var name = DisplayName(e);
+            var textWidth = tileWidth - 10;
+            var (first, second) = SplitName(name, textWidth);
+            var y = artEnd.Y + 4;
+            var nameColor = ImGui.GetColorU32(current || selected ? ImGuiHost.Color(1, 1, 1) : ImGuiHost.Color(0.86f, 0.87f, 0.90f));
+            CenteredText(dl, first, p.X, tileWidth, y, nameColor);
+            if (second.Length > 0)
+                CenteredText(dl, second, p.X, tileWidth, y + line, nameColor);
+            else
+                CenteredText(dl, KindLabel(e), p.X, tileWidth, y + line, ImGui.GetColorU32(Icons.Dim));
+            if (hovered)
+                ImGui.SetTooltip(searching ? $"{e.Path}\n{KindLabel(e)}{(e.Folder ? "" : ", " + FormatSize(e.Size))}" : $"{e.Name}\n{KindLabel(e)}{(e.Folder ? "" : ", " + FormatSize(e.Size))}");
+
+            ItemInteractions(e, IconFor(e));
+            if (clicked)
+                Clicked(entries, i, ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) ? 2 : 1);
+            if (current && _fsScrollToCursor)
+            {
+                _fsScrollToCursor = false;
+                ImGui.SetScrollHereY(0.5f);
+            }
+            ImGui.PopID();
+        }
+        ImGui.PopStyleVar();
+    }
+
+    static (string, string) SplitName(string name, float width)
+    {
+        if (ImGui.CalcTextSize(name).X <= width)
+            return (name, "");
+        // Break at the last space, underscore or dash that fits; otherwise at a character
+        var cut = name.Length;
+        while (cut > 1 && ImGui.CalcTextSize(name[..cut]).X > width)
+            cut--;
+        var soft = name.LastIndexOfAny([' ', '_', '-', '.'], cut - 1);
+        if (soft > cut / 2)
+            cut = soft + 1;
+        return (name[..cut].TrimEnd(), Fit(name[cut..].TrimStart(), width));
+    }
+
+    static void CenteredText(ImDrawListPtr dl, string text, float x, float width, float y, ImColor8 color)
+    {
+        var w = ImGui.CalcTextSize(text).X;
+        dl.AddText(new float2(x + (width - w) / 2, y), color, text);
+    }
+
+    (Icon, float4) IconFor(FsEntry e) => e.Folder ? (Icon.Folder, Icons.FolderColor) : Icons.ForFile(e.Name);
+
+    void YankMarker(ImDrawListPtr dl, FsEntry e, float2 at)
+    {
+        if (_fsYank is not { } y || !y.Paths.Contains(e.Path))
+            return;
+        dl.AddCircleFilled(at, 5, ImGui.GetColorU32(y.Cut ? ImGuiHost.Color(0.93f, 0.40f, 0.36f) : ImGuiHost.Color(0.45f, 0.82f, 0.50f)));
+    }
+
+    void ListRows(List<FsEntry> entries, int cursorIndex, bool searching)
+    {
+        var width = ImGui.GetContentRegionAvail().X;
         var rowHeight = ImGui.GetFrameHeight() + 1;
+        _fsColumns = 1;
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new float2(0, 1));
+        // Column titles: click one to sort by it (again to reverse)
+        var dateX = width - 150;
+        var sizeX = width - 230;
+        var kindX = width - 300;
+        ImGui.TextDisabled("    Name");
+        void Header(string label, float x, FsSort sort)
+        {
+            ImGui.SameLine(x);
+            if (ImGui.SmallButton(label + (_fsSort == sort ? (_fsReverse ? " v" : " ^") : "")))
+                (_fsSort, _fsReverse) = (sort, _fsSort == sort && !_fsReverse);
+        }
+        if (width > 420)
+        {
+            Header("Type", kindX, FsSort.Extension);
+            Header("Size", sizeX, FsSort.Size);
+            Header("Modified", dateX, FsSort.Modified);
+        }
         for (var i = 0; i < entries.Count; i++)
         {
             var e = entries[i];
-            var click = FsRow(e, "c", width, cursor: i == cursorIndex, dim: false);
-            if (click == 0)
-                continue;
-            if (ImGui.GetIO().KeyCtrl && !_fsSelected.Remove(e.Path))
-                _fsSelected.Add(e.Path);
-            _fsCursorIn[_fsDir] = e.Name;
-            if (click == 2)
-                Open(e);
+            var p = ImGui.GetCursorScreenPos();
+            var h = ImGui.GetFrameHeight();
+            ImGui.PushID("row" + e.Path);
+            var clicked = ImGui.InvisibleButton("##row", new float2(Math.Max(1, width - 2), h));
+            var hovered = ImGui.IsItemHovered();
+            var dl = ImGui.GetWindowDrawList();
+            var end = new float2(p.X + width - 2, p.Y + h);
+            var current = i == cursorIndex;
+            var selected = _fsSelected.Contains(e.Path);
+            if (selected || current && _fsSelected.Count == 0)
+                dl.AddRectFilled(p, end, ImGui.GetColorU32(AccentDim), 3);
+            else if (hovered)
+                dl.AddRectFilled(p, end, ImGui.GetColorU32(ImGuiCol.HeaderHovered, 0.6f), 3);
+            if (current)
+                dl.AddRect(p, end, ImGui.GetColorU32(Accent), 3);
+            var (icon, color) = IconFor(e);
+            var size = ImGui.GetTextLineHeight();
+            Icons.Draw(dl, icon, new float2(p.X + 8, p.Y + (h - size) / 2), size, color);
+            var textY = p.Y + (h - ImGui.GetTextLineHeight()) / 2;
+            var label = searching ? e.Path : e.Name;
+            var nameEnd = width > 420 ? p.X + kindX - 8 : end.X - 8;
+            dl.AddText(new float2(p.X + 14 + size, textY), ImGui.GetColorU32(e.Folder ? Icons.FolderColor : e.Hidden ? Icons.Dim : ImGuiHost.Color(0.86f, 0.87f, 0.90f)), Fit(label, nameEnd - p.X - 20 - size));
+            if (width > 420)
+            {
+                var dim = ImGui.GetColorU32(Icons.Dim);
+                dl.AddText(new float2(p.X + kindX, textY), dim, KindLabel(e));
+                if (!e.Folder)
+                    dl.AddText(new float2(p.X + sizeX, textY), dim, FormatSize(e.Size));
+                dl.AddText(new float2(p.X + dateX, textY), dim, e.Modified.ToLocalTime().ToString("yyyy-MM-dd HH:mm"));
+            }
+            YankMarker(dl, e, new float2(p.X + 3, p.Y + h / 2));
+            ItemInteractions(e, (icon, color));
+            if (clicked)
+                Clicked(entries, i, ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) ? 2 : 1);
+            ImGui.PopID();
         }
-        // yazi's scrolloff: the cursor keeps FsScrolloff rows from the edges
+        ImGui.PopStyleVar();
+        // Keep the current row in view, with a margin (yazi's scrolloff)
         if (_fsScrollToCursor && entries.Count > 0)
         {
             _fsScrollToCursor = false;
-            var top = cursorIndex * rowHeight;
+            var top = (cursorIndex + 1) * rowHeight;
             var view = ImGui.GetWindowHeight();
-            var margin = Math.Min(FsScrolloff, (int)(view / rowHeight / 2)) * rowHeight;
+            var margin = Math.Min(5, (int)(view / rowHeight / 2)) * rowHeight;
             var scroll = ImGui.GetScrollY();
             if (top - margin < scroll)
                 ImGui.SetScrollY(Math.Max(0, top - margin));
             else if (top + rowHeight + margin > scroll + view)
                 ImGui.SetScrollY(top + rowHeight + margin - view);
         }
-        // Empty space: drop here to move into this folder; right-click for New
-        var space = ImGui.GetContentRegionAvail();
-        if (space.Y > 4)
-        {
-            ImGui.InvisibleButton("##space", new float2(Math.Max(1, space.X), space.Y));
-            FolderDropTarget(_fsDir);
-            if (ImGui.BeginPopupContextItem("space"))
-            {
-                NewMenu();
-                if (ImGui.MenuItem("Paste here", "p", false, _fsYank != null)) Paste();
-                ImGui.EndPopup();
-            }
-        }
-        ImGui.EndChild();
     }
 
-    /// <summary>
-    /// One entry, drawn like a yazi line: icon, name, size at the right; the cursor line filled, selected
-    /// entries marked at the left (yanked ones in green, cut ones in red). Returns 1 for a click, 2 for a double-click.
-    /// </summary>
-    int FsRow(FsEntry e, string column, float width, bool cursor, bool dim)
+    /// <summary>Dragging an item (into the viewport, onto a node, an asset field or a folder), dropping onto a folder, and its menu.</summary>
+    void ItemInteractions(FsEntry e, (Icon Icon, float4 Color) look)
     {
-        var p = ImGui.GetCursorScreenPos();
-        var h = ImGui.GetFrameHeight();
-        ImGui.PushID(column + e.Path);
-        var clicked = ImGui.InvisibleButton("##row", new float2(Math.Max(1, width - 4), h));
-        var hovered = ImGui.IsItemHovered();
-        var dl = ImGui.GetWindowDrawList();
-        var end = new float2(p.X + width - 4, p.Y + h);
-        if (cursor)
-            dl.AddRectFilled(p, end, ImGui.GetColorU32(dim ? ImGuiHost.Color(0.18f, 0.19f, 0.22f) : ImGuiHost.Color(0.43f, 0.33f, 0.19f)), 3);
-        else if (hovered)
-            dl.AddRectFilled(p, end, ImGui.GetColorU32(ImGuiCol.HeaderHovered, 0.6f), 3);
-        var yank = _fsYank is { } y && y.Paths.Contains(e.Path) ? (y.Cut ? 2 : 1) : 0;
-        var selected = _fsSelected.Contains(e.Path);
-        if (selected || yank != 0)
-        {
-            var marker = yank == 2 ? ImGuiHost.Color(0.93f, 0.40f, 0.36f) : yank == 1 ? ImGuiHost.Color(0.45f, 0.82f, 0.50f) : ImGuiHost.Color(0.88f, 0.66f, 0.36f);
-            dl.AddRectFilled(p, new float2(p.X + 3, end.Y), ImGui.GetColorU32(marker), 1);
-        }
-        var (icon, iconColor) = e.Folder ? (Icon.Folder, Icons.FolderColor) : Icons.ForFile(e.Name);
-        var size = ImGui.GetTextLineHeight();
-        Icons.Draw(dl, icon, new float2(p.X + 8, p.Y + (h - size) / 2), size, iconColor);
-        var info = e.Folder || dim ? "" : FormatSize(e.Size);
-        var infoWidth = info.Length > 0 ? ImGui.CalcTextSize(info).X : 0;
-        var nameX = p.X + 14 + size;
-        var nameColor = selected ? ImGuiHost.Color(0.95f, 0.78f, 0.45f)
-            : cursor && !dim ? ImGuiHost.Color(1, 1, 1)
-            : e.Folder ? Icons.FolderColor
-            : e.Hidden ? Icons.Dim
-            : ImGuiHost.Color(0.84f, 0.85f, 0.88f);
-        var textY = p.Y + (h - ImGui.GetTextLineHeight()) / 2;
-        dl.AddText(new float2(nameX, textY), ImGui.GetColorU32(nameColor), Fit(e.Name, end.X - nameX - infoWidth - 12));
-        if (info.Length > 0)
-            dl.AddText(new float2(end.X - infoWidth - 6, textY), ImGui.GetColorU32(cursor ? ImGuiHost.Color(0.95f, 0.92f, 0.86f) : Icons.Dim), info);
-
-        // Drag a file (into the viewport, onto a node or an asset field, or onto a folder to move it)
-        if (e.Path.Length > 0 && ImGui.BeginDragDropSource())
+        if (ImGui.BeginDragDropSource())
         {
             _draggedAsset = e.Path;
             ImGui.SetDragDropPayload(AssetPayload, default, 0);
-            Icons.Inline(icon, iconColor);
+            Icons.Inline(look.Icon, look.Color);
             ImGui.SameLine();
             ImGui.Text(e.Name);
             ImGui.EndDragDropSource();
         }
         if (e.Folder)
             FolderDropTarget(e.Path);
-        if (e.Path.Length > 0 && ImGui.BeginPopupContextItem("menu"))
+        if (ImGui.BeginPopupContextItem("menu"))
         {
-            if (column == "c")
-                _fsCursorIn[_fsDir] = e.Name;
+            if (!_fsSelected.Contains(e.Path))
+            {
+                _fsSelected.Clear();
+                _fsCursorIn[_fsDir] = e.Path;
+            }
             FileMenu(e);
             ImGui.EndPopup();
         }
-        var result = clicked ? (ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) ? 2 : 1) : 0;
-        ImGui.PopID();
-        return result;
     }
 
     void FolderDropTarget(string folder)
@@ -422,27 +788,47 @@ sealed partial class EditorApp
         : bytes < 1024L * 1024 * 1024 ? $"{bytes / (1024.0 * 1024):0.#}M"
         : $"{bytes / (1024.0 * 1024 * 1024):0.#}G";
 
-    void FsStatus(List<FsEntry> entries, int cursorIndex, FsEntry? cursor)
+    void BottomBar(List<FsEntry> entries, FsEntry? cursor)
     {
-        var dl = ImGui.GetWindowDrawList();
-        var p = ImGui.GetCursorScreenPos();
-        var h = ImGui.GetFrameHeight();
-        var w = ImGui.GetContentRegionAvail().X;
-        // The mode, as yazi's: NOR, VIS (visual) or SEL (something selected)
-        var (mode, modeColor) = _fsVisual ? ("VIS", ImGuiHost.Color(0.45f, 0.68f, 0.98f))
-            : _fsSelected.Count > 0 ? ("SEL", ImGuiHost.Color(0.95f, 0.72f, 0.33f))
-            : ("NOR", ImGuiHost.Color(0.88f, 0.66f, 0.36f));
-        var modeWidth = ImGui.CalcTextSize(mode).X + 16;
-        dl.AddRectFilled(p, new float2(p.X + modeWidth, p.Y + h), ImGui.GetColorU32(modeColor), 4);
-        var textY = p.Y + (h - ImGui.GetTextLineHeight()) / 2;
-        dl.AddText(new float2(p.X + 8, textY), ImGui.GetColorU32(ImGuiHost.Color(0.07f, 0.08f, 0.10f)), mode);
-        var sort = _fsSort.ToString().ToLowerInvariant() + (_fsReverse ? " (reversed)" : "");
-        var right = $"{(cursor == null ? "" : cursor.Modified.ToLocalTime().ToString("yyyy-MM-dd HH:mm") + "   ")}{sort}{(_fsShowHidden ? "   hidden shown" : "")}   {(entries.Count == 0 ? 0 : cursorIndex + 1)}/{entries.Count}";
-        var rightWidth = ImGui.CalcTextSize(right).X;
-        var left = cursor == null ? "" : cursor.Folder ? cursor.Name + "/" : $"{FormatSize(cursor.Size)}   {cursor.Name}";
-        dl.AddText(new float2(p.X + modeWidth + 10, textY), ImGui.GetColorU32(Icons.FileColor), Fit(left, w - modeWidth - rightWidth - 30));
-        dl.AddText(new float2(p.X + w - rightWidth - 4, textY), ImGui.GetColorU32(Icons.Dim), right);
-        ImGui.Dummy(new float2(w, h));
+        var count = $"{entries.Count} item{(entries.Count == 1 ? "" : "s")}";
+        if (_fsSelected.Count > 0) count += $", {_fsSelected.Count} selected";
+        if (_fsYank is { } yank) count += $", {yank.Paths.Count} {(yank.Cut ? "cut" : "copied")} (Ctrl+V pastes)";
+        if (_fsVisual) count += "   VISUAL";
+        if (!_fsSearch.IsEmpty) count += $"   searching for \"{_fsSearch.ToString().Trim()}\"";
+        ImGui.TextDisabled(count);
+        if (cursor != null && !cursor.Folder)
+        {
+            ImGui.SameLine(0, 24);
+            ImGui.TextDisabled($"{cursor.Name}   {FormatSize(cursor.Size)}   {cursor.Modified.ToLocalTime():yyyy-MM-dd HH:mm}");
+        }
+        ImGui.SameLine(ImGui.GetWindowWidth() - 130);
+        if (ImGui.SmallButton("View Options"))
+            ImGui.OpenPopup("fs-view");
+        if (ImGui.BeginPopup("fs-view"))
+        {
+            var changed = false;
+            ImGui.TextDisabled("View");
+            if (ImGui.RadioButton("Tiles", _fsView == FsView.Tiles)) { _fsView = FsView.Tiles; changed = true; }
+            ImGui.SameLine();
+            if (ImGui.RadioButton("List", _fsView == FsView.List)) { _fsView = FsView.List; changed = true; }
+            if (_fsView == FsView.Tiles)
+            {
+                ImGui.SetNextItemWidth(160);
+                changed |= ImGui.SliderFloat("Tile size", ref _fsTileSize, 48, 160, "%.0f");
+            }
+            changed |= ImGui.Checkbox("Preview", ref _fsShowPreview);
+            changed |= ImGui.Checkbox("Hidden files", ref _fsShowHidden);
+            ImGui.Separator();
+            ImGui.TextDisabled("Sort by");
+            foreach (var sort in Enum.GetValues<FsSort>())
+                if (ImGui.RadioButton(sort.ToString(), _fsSort == sort)) { _fsSort = sort; changed = true; }
+            changed |= ImGui.Checkbox("Reversed", ref _fsReverse);
+            ImGui.Separator();
+            if (ImGui.MenuItem("Keys and mouse...")) _fsHelp = true;
+            ImGui.EndPopup();
+            if (changed)
+                SaveView();
+        }
     }
 
     // --- Preview --------------------------------------------------------------------------------------
@@ -452,27 +838,39 @@ sealed partial class EditorApp
 
     static bool IsImage(string name) => Path.GetExtension(name).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".bmp" or ".tga";
 
-    void PreviewColumn(FsEntry? e, float width, float height)
+    void PreviewPane(FsEntry? e, float width, float height)
     {
-        ImGui.BeginChild("preview", new float2(width, height));
+        ImGui.BeginChild("preview", new float2(width, height), ImGuiChildFlags.Borders);
         if (e == null)
         {
+            ImGui.TextDisabled("Nothing selected");
             ImGui.EndChild();
             return;
         }
+        var (icon, color) = IconFor(e);
+        Icons.Inline(icon, color);
+        ImGui.SameLine();
+        ImGui.Text(Fit(e.Name, width - 40));
+        ImGui.TextDisabled(e.Folder ? $"Folder, {Visible(e.Path, forContent: false).Count} items" : $"{KindLabel(e)}, {FormatSize(e.Size)}, {e.Modified.ToLocalTime():yyyy-MM-dd HH:mm}");
+        ImGui.Separator();
         if (e.Folder)
         {
-            var inside = Visible(e.Path);
+            var inside = Visible(e.Path, forContent: false);
             if (inside.Count == 0)
-                ImGui.TextDisabled("  Empty folder");
-            var remembered = _fsCursorIn.ContainsKey(e.Path) ? CursorIn(inside, e.Path) : -1;
-            for (var i = 0; i < inside.Count; i++)
-                if (FsRow(inside[i], "v", width, cursor: i == remembered, dim: true) is var click and not 0)
+                ImGui.TextDisabled("Empty folder");
+            foreach (var c in inside.Take(200))
+            {
+                var (ci, cc) = IconFor(c);
+                Icons.Inline(ci, cc);
+                ImGui.SameLine();
+                if (ImGui.Selectable(c.Name + "##p" + c.Path, false, ImGuiSelectableFlags.AllowDoubleClick))
                 {
                     Cd(e.Path);
-                    _fsCursorIn[e.Path] = inside[i].Name;
-                    if (click == 2) Open(inside[i]);
+                    _fsCursorIn[e.Path] = c.Path;
+                    if (ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                        Open(c);
                 }
+            }
         }
         else if (IsImage(e.Name))
             ImagePreview(e, width);
@@ -483,7 +881,7 @@ sealed partial class EditorApp
         else if (TextFiles.Contains(Path.GetExtension(e.Name).ToLowerInvariant()) || e.Name.StartsWith('.') || Path.GetExtension(e.Name).Length == 0)
             TextPreview(e);
         else
-            ImGui.TextDisabled($"  {FormatSize(e.Size)}, no preview for this kind of file");
+            ImGui.TextDisabled("No preview for this kind of file");
         ImGui.EndChild();
     }
 
@@ -559,10 +957,10 @@ sealed partial class EditorApp
         }
         if (cached.Doc is not { } d)
         {
-            ImGui.TextColored(Warning, "  " + (cached.Problem.Length > 0 ? cached.Problem : "can't read this scene"));
+            ImGui.TextColored(Warning, cached.Problem.Length > 0 ? cached.Problem : "can't read this scene");
             return;
         }
-        ImGui.TextDisabled($"  {d.Nodes.Count} node{(d.Nodes.Count == 1 ? "" : "s")}   (Enter opens it)");
+        ImGui.TextDisabled($"{d.Nodes.Count} node{(d.Nodes.Count == 1 ? "" : "s")}   (double-click or Enter opens it)");
         var depth = new Dictionary<long, int>();
         foreach (var n in d.Nodes.Take(300))
         {
@@ -588,28 +986,26 @@ sealed partial class EditorApp
     {
         if (_view.Model(e.Path) is not { } model)
         {
-            ImGui.TextDisabled("  loading...");
+            ImGui.TextDisabled("loading...");
             return;
         }
         var m = model.Model;
-        ImGui.Text($"  {e.Name}");
-        ImGui.TextDisabled($"  {FormatSize(e.Size)}");
-        ImGui.Text($"  {model.Triangles:N0} triangles, {m.Vertices.Length:N0} vertices");
-        ImGui.Text($"  {m.Materials.Count} material{(m.Materials.Count == 1 ? "" : "s")}, {m.Textures.Count} texture{(m.Textures.Count == 1 ? "" : "s")}");
+        ImGui.Text($"{model.Triangles:N0} triangles, {m.Vertices.Length:N0} vertices");
+        ImGui.Text($"{m.Materials.Count} material{(m.Materials.Count == 1 ? "" : "s")}, {m.Textures.Count} texture{(m.Textures.Count == 1 ? "" : "s")}");
         if (m.IsRigged)
         {
-            ImGui.Text($"  {m.JointCount} bones, far version {m.Lod1.IndexCount / 3:N0} triangles");
-            ImGui.Text("  Clips:");
+            ImGui.Text($"{m.JointCount} bones, far version {m.Lod1.IndexCount / 3:N0} triangles");
+            ImGui.Text("Clips:");
             foreach (var clip in m.Clips)
-                ImGui.TextDisabled($"    {clip.Name}  {clip.Duration:0.00} s");
+                ImGui.TextDisabled($"  {clip.Name}  {clip.Duration:0.00} s");
         }
         else
-            ImGui.TextDisabled("  static model");
+            ImGui.TextDisabled("Static model");
         ImGui.Spacing();
-        ImGui.TextDisabled("  Enter places it; or drag it into the viewport");
+        ImGui.TextDisabled("Double-click or Enter places it; or drag it into the viewport");
     }
 
-    // Images: decoded on a worker thread, shrunk to at most 512 pixels, uploaded; the last few are kept
+    // Images: decoded on a worker thread, shrunk, uploaded; recently used ones are kept (tiles show many)
     sealed class ImagePreviewEntry
     {
         public DateTime Stamp;
@@ -622,17 +1018,20 @@ sealed partial class EditorApp
     }
 
     readonly Dictionary<string, ImagePreviewEntry> _images = [];
+    const int MaxImages = 96;
 
-    void ImagePreview(FsEntry e, float width)
+    /// <summary>A decoded, uploaded picture of an image file at most <paramref name="max"/> pixels across, or null while it decodes.</summary>
+    ImagePreviewEntry? Thumbnail(FsEntry e, int max)
     {
-        if (!_images.TryGetValue(e.Path, out var img) || img.Stamp != e.Modified)
+        var key = e.Path + "@" + max;
+        if (!_images.TryGetValue(key, out var img) || img.Stamp != e.Modified)
         {
             if (img != null)
                 ReleaseImage(img);
             var file = _project.Absolute(e.Path);
-            img = new ImagePreviewEntry { Stamp = e.Modified, Decoding = Task.Run(() => DecodeSmall(file, 512)) };
+            img = new ImagePreviewEntry { Stamp = e.Modified, Decoding = Task.Run(() => DecodeSmall(file, max)) };
             img.Decoding.ContinueWith(_ => Window.Wake());
-            _images[e.Path] = img;
+            _images[key] = img;
             TrimImages();
         }
         img.Used = ImGui.GetTime();
@@ -649,17 +1048,22 @@ sealed partial class EditorApp
                 (img.SourceW, img.SourceH) = (sw, sh);
             }
         }
-        if (img.Error.Length > 0)
-            ImGui.TextColored(Warning, "  " + img.Error);
+        return img.Texture != null || img.Error.Length > 0 ? img : null;
+    }
+
+    void ImagePreview(FsEntry e, float width)
+    {
+        var img = Thumbnail(e, 512);
+        if (img == null)
+            ImGui.TextDisabled("loading...");
+        else if (img.Error.Length > 0)
+            ImGui.TextColored(Warning, img.Error);
         else if (img.Ref is { } texture && img.Texture is { } t)
         {
-            var scale = Math.Min((width - 12) / t.Width, 2f);
-            ImGui.SetCursorPosX(6);
+            var scale = Math.Min((width - 16) / t.Width, 2f);
             ImGui.Image(texture, new float2(t.Width * scale, t.Height * scale));
-            ImGui.TextDisabled($"  {img.SourceW} x {img.SourceH}, {FormatSize(e.Size)}");
+            ImGui.TextDisabled($"{img.SourceW} x {img.SourceH} pixels");
         }
-        else
-            ImGui.TextDisabled("  loading...");
     }
 
     /// <summary>An image file at most <paramref name="max"/> pixels across, box-filtered down, for a preview.</summary>
@@ -692,7 +1096,7 @@ sealed partial class EditorApp
 
     void TrimImages()
     {
-        while (_images.Count > 8)
+        while (_images.Count > MaxImages)
         {
             var oldest = _images.MinBy(kv => kv.Value.Used);
             ReleaseImage(oldest.Value);
@@ -732,35 +1136,50 @@ sealed partial class EditorApp
 
     // --- Keys -----------------------------------------------------------------------------------------
 
-    /// <summary>yazi's default keys (the ones that fit an editor; ~ shows them).</summary>
+    /// <summary>The dock's keys: the usual desktop ones, plus yazi's (~ lists them).</summary>
     void FsKeys(List<FsEntry> entries)
     {
         var io = ImGui.GetIO();
         var cursorIndex = CursorIn(entries, _fsDir);
         var cursor = entries.Count > 0 ? entries[cursorIndex] : null;
         static bool Key(ImGuiKey k) => ImGui.IsKeyPressed(k);
-        var page = Math.Max(1, (int)(ImGui.GetWindowHeight() / (ImGui.GetFrameHeight() + 1)) / 2);
+        var tiles = _fsView == FsView.Tiles;
+        var row = tiles ? _fsColumns : 1;
+        var shift = io.KeyShift;
 
-        // Keys that aren't characters
-        if (Key(ImGuiKey.DownArrow)) SetCursor(entries, cursorIndex + 1);
-        if (Key(ImGuiKey.UpArrow)) SetCursor(entries, cursorIndex - 1);
-        if (Key(ImGuiKey.PageDown) || io.KeyCtrl && Key(ImGuiKey.D)) SetCursor(entries, cursorIndex + page);
-        if (Key(ImGuiKey.PageUp) || io.KeyCtrl && Key(ImGuiKey.U)) SetCursor(entries, cursorIndex - page);
-        if (Key(ImGuiKey.Home)) SetCursor(entries, 0);
-        if (Key(ImGuiKey.End)) SetCursor(entries, entries.Count - 1);
-        if (Key(ImGuiKey.LeftArrow) || Key(ImGuiKey.Backspace)) Leave();
-        if (Key(ImGuiKey.RightArrow) && cursor is { Folder: true }) Cd(cursor.Path);
+        // Arrows move over the tiles (left and right along a row, up and down by rows) or the list
+        if (io.KeyAlt)
+        {
+            if (Key(ImGuiKey.LeftArrow)) Back();
+            if (Key(ImGuiKey.RightArrow)) Forward();
+            if (Key(ImGuiKey.UpArrow)) Leave();
+            return;
+        }
+        if (Key(ImGuiKey.DownArrow)) SetCursor(entries, cursorIndex + row, shift);
+        if (Key(ImGuiKey.UpArrow)) SetCursor(entries, cursorIndex - row, shift);
+        if (tiles)
+        {
+            if (Key(ImGuiKey.RightArrow)) SetCursor(entries, cursorIndex + 1, shift);
+            if (Key(ImGuiKey.LeftArrow)) SetCursor(entries, cursorIndex - 1, shift);
+        }
+        else
+        {
+            if (Key(ImGuiKey.LeftArrow)) Leave();
+            if (Key(ImGuiKey.RightArrow) && cursor is { Folder: true }) Cd(cursor.Path);
+        }
+        if (Key(ImGuiKey.PageDown) || io.KeyCtrl && Key(ImGuiKey.D)) SetCursor(entries, cursorIndex + Math.Max(row, 10), shift);
+        if (Key(ImGuiKey.PageUp) || io.KeyCtrl && Key(ImGuiKey.U)) SetCursor(entries, cursorIndex - Math.Max(row, 10), shift);
+        if (Key(ImGuiKey.Home)) SetCursor(entries, 0, shift);
+        if (Key(ImGuiKey.End)) SetCursor(entries, entries.Count - 1, shift);
+        if (Key(ImGuiKey.Backspace)) Leave();
         if ((Key(ImGuiKey.Enter) || Key(ImGuiKey.KeypadEnter)) && cursor != null) Open(cursor);
         if (Key(ImGuiKey.Delete) && Targets(cursor) is { Count: > 0 } toTrash) AskTrash(toTrash);
         if (Key(ImGuiKey.F2) && cursor != null) StartInput(FsInput.Rename, cursor.Name);
         if (Key(ImGuiKey.F1)) _fsHelp = true;
-        if (io.KeyCtrl && Key(ImGuiKey.A))
-            foreach (var e in entries)
-                _fsSelected.Add(e.Path);
         if (Key(ImGuiKey.Escape))
         {
             if (_fsVisual) _fsVisual = false;
-            else if (_fsFilter.Length > 0) _fsFilter = "";
+            else if (!_fsSearch.IsEmpty) _fsSearch.SetValue("".AsSpan());
             else if (_fsFind.Length > 0) _fsFind = "";
             else _fsSelected.Clear();
             _fsPending = '\0';
@@ -772,9 +1191,17 @@ sealed partial class EditorApp
             SetCursor(entries, cursorIndex + 1);
         }
         if (io.KeyCtrl)
-            return; // the rest are plain characters
+        {
+            // The usual desktop shortcuts
+            if (Key(ImGuiKey.A)) foreach (var e in entries) _fsSelected.Add(e.Path);
+            if (Key(ImGuiKey.C) && Targets(cursor) is { Count: > 0 } copy) Yank(copy, cut: false);
+            if (Key(ImGuiKey.X) && Targets(cursor) is { Count: > 0 } cut) Yank(cut, cut: true);
+            if (Key(ImGuiKey.V)) Paste();
+            if (Key(ImGuiKey.F)) _fsFocusSearch = true;
+            return;
+        }
 
-        // Characters, read as typed, so the keys work on any keyboard layout
+        // yazi's keys, read as typed characters, so they work on any keyboard layout
         foreach (var codepoint in io.InputQueueCharacters.Span)
         {
             var ch = (char)codepoint;
@@ -801,35 +1228,25 @@ sealed partial class EditorApp
                     else Open(cursor);
                     break;
                 case 'o' when cursor != null: Open(cursor); break;
-                case 'H' when _fsBack.Count > 0:
-                    _fsForward.Push(_fsDir);
-                    Cd(_fsBack.Pop(), remember: false);
-                    break;
-                case 'L' when _fsForward.Count > 0:
-                    _fsBack.Push(_fsDir);
-                    Cd(_fsForward.Pop(), remember: false);
-                    break;
+                case 'H': Back(); break;
+                case 'L': Forward(); break;
                 case 'v':
                     _fsVisual = !_fsVisual;
                     _fsVisualAnchor = cursorIndex;
                     if (_fsVisual) SetCursor(entries, cursorIndex);
                     break;
-                case 'y' or 'x' when Targets(cursor) is { Count: > 0 } targets:
-                    _fsYank = (targets, ch == 'x');
-                    _fsSelected.Clear();
-                    _fsVisual = false;
-                    break;
+                case 'y' or 'x' when Targets(cursor) is { Count: > 0 } targets: Yank(targets, ch == 'x'); break;
                 case 'Y' or 'X': _fsYank = null; break;
                 case 'p' or 'P': Paste(); break;
                 case 'd' or 'D' when Targets(cursor) is { Count: > 0 } targets: AskTrash(targets); break;
                 case 'a': StartInput(FsInput.Create, ""); break;
                 case 'r' when cursor != null: StartInput(FsInput.Rename, cursor.Name); break;
-                case '.': _fsShowHidden = !_fsShowHidden; break;
+                case '.': _fsShowHidden = !_fsShowHidden; SaveView(); break;
                 case '/': StartInput(FsInput.Find, ""); break;
                 case '?': StartInput(FsInput.FindBack, ""); break;
                 case 'n': FindNext(entries, forward: true); break;
                 case 'N': FindNext(entries, forward: false); break;
-                case 'f': StartInput(FsInput.Filter, _fsFilter); break;
+                case 'f': _fsFocusSearch = true; break;
                 case 'm' when cursor != null: ToggleBookmark(cursor.Path); break;
                 case '\'': _fsBookmarksOpen = true; break;
                 case '~': _fsHelp = true; break;
@@ -859,7 +1276,10 @@ sealed partial class EditorApp
                     _ => null,
                 };
                 if (sort is { } chosen)
+                {
                     (_fsSort, _fsReverse) = (chosen, char.IsUpper(s));
+                    SaveView();
+                }
                 break;
         }
     }
@@ -868,6 +1288,13 @@ sealed partial class EditorApp
     {
         ImGui.SetClipboardText(text);
         Log.Info("editor", $"copied {text}");
+    }
+
+    void Yank(List<string> paths, bool cut)
+    {
+        _fsYank = (paths, cut);
+        _fsSelected.Clear();
+        _fsVisual = false;
     }
 
     void ToggleBookmark(string path)
@@ -884,10 +1311,10 @@ sealed partial class EditorApp
             return;
         var from = _fsDir;
         Cd(Parent(_fsDir));
-        _fsCursorIn[_fsDir] = Path.GetFileName(from);
+        _fsCursorIn[_fsDir] = from;
     }
 
-    /// <summary>Enter, l or o: into a folder, or open a file (a scene in the editor, a script in the script editor, a model placed in the scene, anything else with the desktop's app).</summary>
+    /// <summary>Double-click or Enter: into a folder, or open a file (a scene in the editor, a script in the script editor, a model placed in the scene, anything else with the desktop's app).</summary>
     void Open(FsEntry e)
     {
         if (e.Folder)
@@ -924,9 +1351,37 @@ sealed partial class EditorApp
         }
     }
 
+    // --- View settings --------------------------------------------------------------------------------
+
+    void LoadView()
+    {
+        _fsViewLoaded = true;
+        var v = _settings.Get("filesystem", EditorJson.Default.DictionaryStringString);
+        if (v.GetValueOrDefault("view") is { } view && Enum.TryParse<FsView>(view, out var fv)) _fsView = fv;
+        if (v.GetValueOrDefault("sort") is { } sort && Enum.TryParse<FsSort>(sort, out var fs)) _fsSort = fs;
+        if (v.GetValueOrDefault("tile") is { } tile && float.TryParse(tile, System.Globalization.CultureInfo.InvariantCulture, out var ft)) _fsTileSize = Math.Clamp(ft, 48, 160);
+        _fsReverse = v.GetValueOrDefault("reverse") == "true";
+        _fsShowHidden = v.GetValueOrDefault("hidden") == "true";
+        _fsShowPreview = v.GetValueOrDefault("preview") != "false";
+    }
+
+    void SaveView()
+    {
+        _settings.Set("filesystem", new Dictionary<string, string>
+        {
+            ["view"] = _fsView.ToString(),
+            ["sort"] = _fsSort.ToString(),
+            ["tile"] = _fsTileSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["reverse"] = _fsReverse ? "true" : "false",
+            ["hidden"] = _fsShowHidden ? "true" : "false",
+            ["preview"] = _fsShowPreview ? "true" : "false",
+        }, EditorJson.Default.DictionaryStringString);
+        _settings.Save();
+    }
+
     // --- Operations ----------------------------------------------------------------------------------
 
-    /// <summary>p: copies (or moves, after x) what was yanked into this folder; a name that's taken gets _1, _2 and so on.</summary>
+    /// <summary>Paste: copies (or moves, after a cut) what was copied into this folder; a name that's taken gets _1, _2 and so on.</summary>
     void Paste()
     {
         if (_fsYank is not { } yank)
@@ -953,12 +1408,52 @@ sealed partial class EditorApp
                     ProjectFiles.Copy(_project.Absolute(from), _project.Absolute(to));
                     Log.Info("editor", $"copied {from} to {to}");
                 }
-                _fsCursorIn[folder] = Path.GetFileName(to);
+                _fsCursorIn[folder] = to;
             }
             if (yank.Cut)
                 _fsYank = null;
             FsRefresh();
         };
+    }
+
+    void StartImport()
+    {
+        _fsImport.StartFiles($"Import into {(_fsDir.Length == 0 ? _project.Name : _fsDir)}: tick files (from any folder)",
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        _fsImportOpen = true;
+    }
+
+    void ImportDialog()
+    {
+        if (_fsImportOpen)
+        {
+            ImGui.OpenPopup("fs-import");
+            _fsImportOpen = false;
+        }
+        if (!ImGui.BeginPopupModal("fs-import", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
+            return;
+        var result = _fsImport.DrawInline();
+        if (result != null)
+        {
+            ImGui.CloseCurrentPopup();
+            if (result == "files")
+            {
+                var folder = _fsDir;
+                var files = _fsImport.Files.ToList();
+                _afterTree = () =>
+                {
+                    foreach (var file in files)
+                    {
+                        var to = ProjectFiles.FreeName(_project.Root, folder, Path.GetFileName(file));
+                        File.Copy(file, _project.Absolute(to));
+                        _fsCursorIn[folder] = to;
+                        Log.Info("editor", $"imported {Path.GetFileName(file)} as {to}");
+                    }
+                    FsRefresh();
+                };
+            }
+        }
+        ImGui.EndPopup();
     }
 
     void AskTrash(List<string> paths)
@@ -976,7 +1471,7 @@ sealed partial class EditorApp
         _fsInputOpen = true;
     }
 
-    /// <summary>The input box for find, filter, create and rename, popped up as yazi's.</summary>
+    /// <summary>The input box for find, create and rename, popped up as yazi's.</summary>
     void FsInputBox(List<FsEntry> entries)
     {
         if (_fsInputOpen)
@@ -994,8 +1489,7 @@ sealed partial class EditorApp
         {
             FsInput.Find => "Find next:",
             FsInput.FindBack => "Find previous:",
-            FsInput.Filter => "Filter:",
-            FsInput.Create => "Create (name/ for a folder, name.scene.json for a scene):",
+            FsInput.Create => "New (name/ makes a folder, name.scene.json a scene):",
             _ => "Rename:",
         };
         ImGui.Text(title);
@@ -1004,11 +1498,9 @@ sealed partial class EditorApp
         ImGui.SetNextItemWidth(380);
         var enter = ImGui.InputText("##input", _fsInputEdit, ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll);
         var text = _fsInputEdit.ToString();
-        // Find and filter act as you type
-        if (_fsInput == FsInput.Filter)
-            _fsFilter = text.Trim();
         if (_fsInput is FsInput.Find or FsInput.FindBack && text != _fsFind)
         {
+            // Find acts as you type
             _fsFind = text;
             var start = CursorIn(entries, _fsDir);
             if (entries.Count > 0 && !entries[start].Name.Contains(text, StringComparison.OrdinalIgnoreCase))
@@ -1016,7 +1508,6 @@ sealed partial class EditorApp
         }
         if (ImGui.IsKeyPressed(ImGuiKey.Escape))
         {
-            if (_fsInput == FsInput.Filter) _fsFilter = "";
             _fsInput = FsInput.None;
             ImGui.CloseCurrentPopup();
         }
@@ -1031,20 +1522,20 @@ sealed partial class EditorApp
             else if (kind == FsInput.Rename && name.Length > 0 && entries.Count > 0)
             {
                 var e = entries[CursorIn(entries, _fsDir)];
-                var to = Join(_fsDir, e.Folder ? name : ProjectFiles.KeepExtension(e.Name, name));
+                var to = Join(Parent(e.Path), e.Folder ? name : ProjectFiles.KeepExtension(e.Name, name));
                 var folder = _fsDir;
                 if (to != e.Path)
                     _afterTree = () =>
                     {
                         MoveFile(e.Path, to);
-                        _fsCursorIn[folder] = Path.GetFileName(to);
+                        _fsCursorIn[folder] = to;
                     };
             }
         }
         ImGui.EndPopup();
     }
 
-    /// <summary>a: a folder (name ending in /), a scene (.scene.json, then opened), or an empty file.</summary>
+    /// <summary>A folder (name ending in /), a scene (.scene.json, then opened), or an empty file.</summary>
     void Create(string name)
     {
         var path = ProjectFiles.Create(_project.Root, _fsDir, name);
@@ -1064,7 +1555,7 @@ sealed partial class EditorApp
         }
         if (!ImGui.BeginPopup("bookmarks"))
             return;
-        ImGui.TextDisabled("Bookmarks (m on a file or folder adds one)");
+        ImGui.TextDisabled("Bookmarks (m, or Bookmark in an item's menu, adds one)");
         if (_favorites.Count == 0)
             ImGui.TextDisabled("  none yet");
         foreach (var f in _favorites.ToList())
@@ -1085,41 +1576,46 @@ sealed partial class EditorApp
     void FileMenu(FsEntry e)
     {
         var path = e.Path;
-        if (!e.Folder)
+        var targets = _fsSelected.Contains(path) ? [.. _fsSelected] : new List<string> { path };
+        var many = targets.Count > 1 ? $" {targets.Count} items" : "";
+        if (e.Folder)
         {
-            if (path.EndsWith(".scene.json", StringComparison.Ordinal))
-            {
-                if (ImGui.MenuItem("Open scene", "Enter")) _afterTree = () => OpenScene(path);
-                if (ImGui.MenuItem("Instance in scene", default, false, path != _scene.Path))
-                    _afterTree = () => InstanceScene(path, NewNodePosition(), _scene.Primary);
-            }
-            else if (IsModel(path) && ImGui.MenuItem("Place in scene", "Enter"))
-                _afterTree = () => Place(path, NewNodePosition(), _scene.Primary);
-            else if (path.EndsWith(".cs", StringComparison.Ordinal) && ImGui.MenuItem("Open script", "Enter"))
-                _pendingScript = (_project.Absolute(path), -1);
-            ImGui.Separator();
+            if (ImGui.MenuItem("Open", "Enter")) Cd(path);
         }
-        if (ImGui.MenuItem("Yank (copy)", "y")) _fsYank = ([path], false);
-        if (ImGui.MenuItem("Cut", "x")) _fsYank = ([path], true);
-        if (ImGui.MenuItem("Paste here", "p", false, _fsYank != null)) Paste();
-        if (ImGui.MenuItem("Rename", "r")) StartInput(FsInput.Rename, e.Name);
-        if (ImGui.MenuItem("Move to trash", "d")) AskTrash([path]);
+        else if (path.EndsWith(".scene.json", StringComparison.Ordinal))
+        {
+            if (ImGui.MenuItem("Open scene", "Enter")) _afterTree = () => OpenScene(path);
+            if (ImGui.MenuItem("Instance in scene", default, false, path != _scene.Path))
+                _afterTree = () => InstanceScene(path, NewNodePosition(), _scene.Primary);
+        }
+        else if (IsModel(path))
+        {
+            if (ImGui.MenuItem("Place in scene", "Enter")) _afterTree = () => Place(path, NewNodePosition(), _scene.Primary);
+        }
+        else if (path.EndsWith(".cs", StringComparison.Ordinal))
+        {
+            if (ImGui.MenuItem("Open script", "Enter")) _pendingScript = (_project.Absolute(path), -1);
+        }
+        else if (ImGui.MenuItem("Open with the desktop's app", "Enter"))
+            ActivateFile(path);
         ImGui.Separator();
-        NewMenu();
+        if (ImGui.MenuItem("Copy" + many, "Ctrl+C")) Yank(targets, cut: false);
+        if (ImGui.MenuItem("Cut" + many, "Ctrl+X")) Yank(targets, cut: true);
+        if (ImGui.MenuItem("Paste", "Ctrl+V", false, _fsYank != null)) Paste();
+        if (ImGui.MenuItem("Rename", "F2", false, targets.Count == 1)) StartInput(FsInput.Rename, e.Name);
+        if (ImGui.MenuItem("Move to trash" + many, "Delete")) AskTrash(targets);
+        ImGui.Separator();
         if (ImGui.MenuItem(_favorites.Contains(path) ? "Remove bookmark" : "Bookmark", "m")) ToggleBookmark(path);
         if (ImGui.MenuItem("Copy path", "c c")) Copy(path);
         if (ImGui.MenuItem("Show in file manager"))
             Process.Start(new ProcessStartInfo("xdg-open", [_project.Absolute(e.Folder ? path : Parent(path))]) { UseShellExecute = false })?.Dispose();
     }
 
-    void NewMenu()
+    void NewItems()
     {
-        if (!ImGui.BeginMenu("New"))
-            return;
-        if (ImGui.MenuItem("Folder", "a  name/")) StartInput(FsInput.Create, "/");
-        if (ImGui.MenuItem("Scene", "a  name.scene.json")) StartInput(FsInput.Create, ".scene.json");
-        if (ImGui.MenuItem("Script...")) _scripts.NewScript("NewScript");
-        ImGui.EndMenu();
+        if (ImGui.MenuItem("New folder")) StartInput(FsInput.Create, "New folder/");
+        if (ImGui.MenuItem("New scene")) StartInput(FsInput.Create, "new.scene.json");
+        if (ImGui.MenuItem("New script...")) _scripts.NewScript("NewScript");
     }
 
     void FsConfirmDelete()
@@ -1176,24 +1672,28 @@ sealed partial class EditorApp
 
     static readonly (string Keys, string What)[] FsKeyHelp =
     [
-        ("j k  ↓ ↑", "move; J K by five; ctrl+d ctrl+u half a page"),
-        ("gg  G", "top, bottom"),
-        ("h  l  ← →", "parent folder, into a folder"),
-        ("Enter  o", "open: a scene, a script, place a model"),
-        ("H  L", "back, forward"),
-        ("gh", "the project's top"),
-        ("Space  v  ctrl+a", "select, visual select, select all"),
-        ("y  x  p", "yank (copy), cut, paste here; Y X cancel"),
-        ("d", "move to trash"),
-        ("a", "create (name/ for a folder, name.scene.json for a scene)"),
-        ("r", "rename (keeps the extension)"),
-        ("/  ?  n  N", "find next, previous; next and previous match"),
-        ("f", "filter"),
-        (".", "show hidden files"),
-        (",n ,a ,m ,e ,s", "sort: natural, alphabetical, modified, extension, size; capital reverses"),
+        ("Click, Ctrl+click, Shift+click", "select; add or remove; select the range"),
+        ("Double-click, Enter", "open: into a folder, a scene, a script, place a model"),
+        ("Drag", "into the viewport, onto a node or an asset field; onto a folder to move"),
+        ("Right-click", "everything you can do with it"),
+        ("Arrows", "move (left and right along a row of tiles)"),
+        ("Backspace, Alt+Up", "up a folder"),
+        ("Alt+Left, Alt+Right", "back, forward"),
+        ("Ctrl+C  Ctrl+X  Ctrl+V", "copy, cut, paste"),
+        ("F2  Delete", "rename (keeps the extension), move to trash"),
+        ("Ctrl+A  Ctrl+F", "select all, search"),
+        ("", ""),
+        ("yazi keys", ""),
+        ("j k  J K  gg G", "move; by five; top, bottom"),
+        ("h  l  H  L  gh", "up, into; back, forward; the project's top"),
+        ("Space  v", "select; select a range"),
+        ("y  x  p", "copy, cut, paste; Y X cancel"),
+        ("d  a  r", "trash, create (name/ for a folder), rename"),
+        ("/  ?  n  N  f", "find next, previous; next and previous match; search"),
+        (".  ,n ,a ,m ,e ,s", "hidden files; sort (capital reverses)"),
         ("cc cd cf cn", "copy the path, folder, file name, name without extension"),
         ("m  '", "bookmark, bookmarks"),
-        ("Esc", "leave visual mode, clear the filter, find or selection"),
+        ("Esc", "leave a range, clear the search or selection"),
     ];
 
     void FsHelpWindow()
@@ -1205,7 +1705,7 @@ sealed partial class EditorApp
         }
         if (!ImGui.BeginPopup("fs-help"))
             return;
-        ImGui.TextDisabled("FileSystem keys (as yazi's)");
+        ImGui.TextDisabled("FileSystem: mouse and keys");
         ImGui.Separator();
         if (ImGui.BeginTable("keys", 2))
         {
@@ -1213,7 +1713,10 @@ sealed partial class EditorApp
             {
                 ImGui.TableNextRow();
                 ImGui.TableNextColumn();
-                ImGui.TextColored(ImGuiHost.Color(0.88f, 0.66f, 0.36f), keys);
+                if (what.Length == 0 && keys.Length > 0)
+                    ImGui.TextDisabled(keys);
+                else
+                    ImGui.TextColored(Accent, keys);
                 ImGui.TableNextColumn();
                 ImGui.Text(what);
             }
