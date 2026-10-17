@@ -396,7 +396,7 @@ sealed partial class EditorApp : IDisposable
         if (ImGui.IsKeyPressed(ImGuiKey.F2) && !_scene.Primary.IsNone) _renameRequested = true;
     }
 
-    /// <summary>Saves the scene and scripts, then runs the game, as Godot does.</summary>
+    /// <summary>Saves the scene and scripts, then runs the game.</summary>
     void Play()
     {
         if (_runner.Running)

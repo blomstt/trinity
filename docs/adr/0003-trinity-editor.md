@@ -4,7 +4,7 @@ Date: 2026-10-17. Status: accepted.
 
 ## Context
 
-Trinity was planned as a library with only a small debug overlay (E9), late in the roadmap. An editor application like Godot's makes the engine usable much sooner.
+Trinity was planned as a library with only a small debug overlay (E9), late in the roadmap. A full editor application (scenes, assets, inspector, play) makes the engine usable much sooner.
 
 ## Decision
 
