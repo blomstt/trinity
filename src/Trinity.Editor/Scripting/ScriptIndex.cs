@@ -17,7 +17,7 @@ sealed record ScriptInfo(string Name, string File, int Line, IReadOnlyList<Scrip
 /// </summary>
 sealed partial class ScriptIndex
 {
-    public static readonly string[] FieldTypes = ["float", "double", "int", "bool", "string", "Vector3"];
+    public static readonly string[] FieldTypes = ["float", "double", "int", "bool", "string", "Vector3", "Node"];
 
     readonly string _root;
     Dictionary<string, ScriptInfo> _scripts = [];
@@ -149,6 +149,8 @@ sealed partial class ScriptIndex
                 return init == "true";
             case "string":
                 return init.Length >= 2 && init[0] == '"' && init[^1] == '"' ? init[1..^1] : "";
+            case "Node":
+                return ""; // no node until one is picked
             default:
                 if (NewVector3().Match(init) is { Success: true } v)
                     return new Vector3(F(v.Groups[1].Value), F(v.Groups[2].Value), F(v.Groups[3].Value));

@@ -81,34 +81,40 @@ sealed class SceneView : IDisposable
     public int GizmoAxis = -1;
 
     /// <summary>Advances the animation previews and records the scene into <see cref="Output"/>, with the selection's bounds and move gizmo.</summary>
-    public void Render(CommandBuffer cmd, EditorScene scene, Node? selected, float dt, double time)
+    public void Render(CommandBuffer cmd, EditorScene scene, float dt, double time)
     {
         if (Output == null || _view == null)
             return;
-        foreach (var o in scene.Objects)
-            if (o.Playing)
-                o.Time += dt * o.Speed;
-        scene.File.Environment.ApplyTo(_scene.Renderer.Settings);
+        foreach (ref var animator in scene.World.Store<Animator>().Components)
+            if (!animator.Paused)
+                animator.Time += dt * animator.Speed;
+        scene.Environment.ApplyTo(_scene.Renderer.Settings);
         _view.DebugView = DebugView;
         _view.GridHalfSize = MathF.Max(60f, Camera.Distance * 6f);
-        if (selected != null)
-            DrawSelection(selected);
-        _scene.Render(cmd, _view, scene.Objects, ViewCamera, RenderOutput.To(Output), time, selected, Camera.Target);
+        foreach (var e in scene.Selection)
+            DrawBounds(scene.World, e);
+        if (scene.World.IsAlive(scene.Primary))
+            DrawGizmo(scene.World.WorldPosition(scene.Primary));
+        _scene.Render(cmd, _view, scene.World, ViewCamera, RenderOutput.To(Output), time, scene.Selection, Camera.Target);
     }
 
-    void DrawSelection(Node o)
+    void DrawBounds(World world, EntityId e)
     {
-        if (Model(o.Model) is { } m)
-            Debug.Box(Matrix4x4.CreateScale(m.BoundsMax - m.BoundsMin) * Matrix4x4.CreateTranslation((m.BoundsMin + m.BoundsMax) / 2) * o.Transform, Debug.Bronze with { W = 0.8f });
-        var length = GizmoLength(o);
+        if (world.Has<MeshRenderer>(e) && Model(world.Get<MeshRenderer>(e).Mesh) is { } m)
+            Debug.Box(Matrix4x4.CreateScale(m.BoundsMax - m.BoundsMin) * Matrix4x4.CreateTranslation((m.BoundsMin + m.BoundsMax) / 2) * world.WorldMatrix(e), Debug.Bronze with { W = 0.8f });
+    }
+
+    void DrawGizmo(Vector3 at)
+    {
+        var length = GizmoLength(at);
         ReadOnlySpan<Vector3> axes = [Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ];
         Span<Vector4> colors = [Debug.Red, Debug.Green, Debug.Blue];
         for (var a = 0; a < 3; a++)
-            Debug.Arrow(o.Position, o.Position + axes[a] * length, a == GizmoAxis ? Debug.Yellow : colors[a], onTop: true);
+            Debug.Arrow(at, at + axes[a] * length, a == GizmoAxis ? Debug.Yellow : colors[a], onTop: true);
     }
 
     /// <summary>The move gizmo's arrow length: a steady size on screen.</summary>
-    public float GizmoLength(Node o) => Vector3.Distance(ViewCamera.Position, o.Position) * 0.15f;
+    public float GizmoLength(Vector3 at) => Vector3.Distance(ViewCamera.Position, at) * 0.15f;
 
     /// <summary>A world point's position in the viewport (pixels from its top left), or null behind the camera.</summary>
     public Vector2? ToScreen(Vector3 world)
@@ -134,22 +140,25 @@ sealed class SceneView : IDisposable
         return (a, Vector3.Normalize(b - a));
     }
 
-    /// <summary>The nearest node whose model's box the ray hits.</summary>
-    public Node? Pick(EditorScene scene, (Vector3 Origin, Vector3 Direction) ray)
+    /// <summary>The nearest visible node whose model's box the ray hits, or none.</summary>
+    public EntityId Pick(World world, (Vector3 Origin, Vector3 Direction) ray)
     {
-        Node? best = null;
+        var best = EntityId.None;
         var bestT = float.MaxValue;
-        foreach (var o in scene.Objects)
+        var renderers = world.Store<MeshRenderer>();
+        for (var i = 0; i < renderers.Count; i++)
         {
-            if (Model(o.Model) is not { } m || !Matrix4x4.Invert(o.Transform, out var inv))
+            var e = renderers.Entities[i];
+            var transform = world.WorldMatrix(e);
+            if (world.HiddenInHierarchy(e) || Model(renderers.Components[i].Mesh) is not { } m || !Matrix4x4.Invert(transform, out var inv))
                 continue;
             var origin = Vector3.Transform(ray.Origin, inv);
             var dir = Vector3.TransformNormal(ray.Direction, inv);
             if (HitBox(origin, dir, m.BoundsMin, m.BoundsMax) is { } local)
             {
-                var t = Vector3.Distance(ray.Origin, Vector3.Transform(origin + dir * local, o.Transform));
+                var t = Vector3.Distance(ray.Origin, Vector3.Transform(origin + dir * local, transform));
                 if (t < bestT)
-                    (best, bestT) = (o, t);
+                    (best, bestT) = (e, t);
             }
         }
         return best;
@@ -180,9 +189,9 @@ sealed class SceneView : IDisposable
     }
 
     /// <summary>Points the camera at a node, at a distance that fits it.</summary>
-    public void Frame(Node o)
+    public void Frame(World world, EntityId e)
     {
-        var (centre, size) = _scene.Bounds(o);
+        var (centre, size) = _scene.Bounds(world, e);
         Camera.Target = centre;
         Camera.Distance = MathF.Max(1.5f, size * 1.6f);
     }

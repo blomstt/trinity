@@ -149,6 +149,7 @@ public sealed unsafe class Renderer : IDisposable
     const int Passes = 5;
     Vector4[] _spheres = [];
     byte[] _lods = [];
+    bool[] _noShadows = [];
     readonly List<uint> _visible = [];
     readonly Dictionary<(Mesh Mesh, int Pass, int Lod), (int Offset, int Count)> _ranges = [];
 
@@ -574,7 +575,7 @@ public sealed unsafe class Renderer : IDisposable
                     var start = _visible.Count;
                     for (var i = first; i < first + count; i++)
                     {
-                        if (_lods[i] != lod && lods == 2)
+                        if ((_lods[i] != lod && lods == 2) || (pass > 0 && _noShadows[i]))
                             continue;
                         var s = _spheres[i];
                         if (frusta[pass].Contains(new Vector3(s.X, s.Y, s.Z), s.W))
@@ -622,6 +623,7 @@ public sealed unsafe class Renderer : IDisposable
         {
             _spheres = new Vector4[draws.Count * 2];
             _lods = new byte[draws.Count * 2];
+            _noShadows = new bool[draws.Count * 2];
         }
         var n = 0;
         foreach (var mesh in _batchOrder)
@@ -637,6 +639,7 @@ public sealed unsafe class Renderer : IDisposable
                 var scale = MathF.Sqrt(MathF.Max(new Vector3(m.M11, m.M12, m.M13).LengthSquared(), MathF.Max(new Vector3(m.M21, m.M22, m.M23).LengthSquared(), new Vector3(m.M31, m.M32, m.M33).LengthSquared())));
                 var radius = localRadius * scale;
                 _spheres[n] = new Vector4(centre, radius);
+                _noShadows[n] = item.NoShadows;
                 _lods[n] = (byte)(Vector3.Distance(centre, camera.Position) > radius * Settings.LodDistance ? 1 : 0);
                 instances[n++] = new InstanceConstants
                 {

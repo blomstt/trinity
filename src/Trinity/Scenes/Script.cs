@@ -15,17 +15,30 @@ namespace Trinity.Scenes;
 /// }
 /// </code>
 /// Scripts are found at build time (Trinity.Generators), not by reflection, so they work under NativeAOT.
-/// Inspector fields can be <c>float</c>, <c>double</c>, <c>int</c>, <c>bool</c>, <c>string</c> or <c>Vector3</c>.
+/// Inspector fields can be <c>float</c>, <c>double</c>, <c>int</c>, <c>bool</c>, <c>string</c>,
+/// <c>Vector3</c> or <c>Node</c> (a reference to another node, kept across saves).
+/// <para>
+/// Order: when a scene starts, every script is created first, then <see cref="Ready"/> runs children
+/// before parents (as in Godot), so a parent's Ready sees its children ready. Updates run in the order
+/// scripts were created. <see cref="Destroyed"/> runs before the node goes; after that the script gets
+/// no more calls, and <see cref="Node"/> is no longer valid.
+/// </para>
 /// </summary>
 public abstract class Script
 {
-    public Node Node { get; internal set; } = null!;
+    /// <summary>The node this script is on. (A field, so <c>Node.Position = ...</c> works; don't assign it.)</summary>
+    public Node Node;
+
     public Scene Scene { get; internal set; } = null!;
+    public World World => Scene.World;
     public Engine Engine => Scene.Engine;
     protected Input Input => Engine.Input;
 
-    /// <summary>Called once, when the scene starts, after every node's script exists.</summary>
+    /// <summary>Called once, after every script in the scene exists; children before their parents.</summary>
     public virtual void Ready() { }
+
+    /// <summary>Called when the node is destroyed (or the scene unloads), while it still exists.</summary>
+    public virtual void Destroyed() { }
 
     /// <summary>Once per frame.</summary>
     public virtual void Update(in FrameTime time) { }
@@ -51,11 +64,15 @@ public static class Scripts
     public static void Register(string name, Func<Script> create, params (string Name, FieldSetter Set)[] fields) =>
         Registered[name] = new Entry(create, fields.ToDictionary(f => f.Name, f => f.Set));
 
+    [ThreadStatic]
+    static World? _world;
+
     /// <summary>A new instance of the named script with the given field values, or null if there's no such script.</summary>
-    public static Script? Create(string name, IReadOnlyDictionary<string, JsonElement>? fields)
+    public static Script? Create(string name, IReadOnlyDictionary<string, JsonElement>? fields, World? world = null)
     {
         if (!Registered.TryGetValue(name, out var entry))
             return null;
+        _world = world;
         var script = entry.Create();
         foreach (var (field, value) in fields ?? new Dictionary<string, JsonElement>())
         {
@@ -73,7 +90,15 @@ public static class Scripts
                 Log.Warn("scene", $"{name}.{field}: can't use {value.GetRawText()} ({e.Message})");
             }
         }
+        _world = null;
         return script;
+    }
+
+    /// <summary>Used by the generated setters: a node reference (resolved when the scene loaded).</summary>
+    public static Node ReadNode(JsonElement e)
+    {
+        var id = SceneSchema.ReadEntity(e);
+        return _world != null && _world.IsAlive(id) ? new Node(_world, id) : Node.None;
     }
 
     /// <summary>Used by the generated setters: a Vector3 from a JSON [x, y, z].</summary>

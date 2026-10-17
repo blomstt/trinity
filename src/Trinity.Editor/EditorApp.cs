@@ -12,7 +12,7 @@ using Trinity.Scenes;
 namespace Trinity.Editor;
 
 /// <summary>Trinity Editor: one window with a viewport and docked panels, editing one project's scenes.</summary>
-sealed class EditorApp : IDisposable
+sealed partial class EditorApp : IDisposable
 {
     const string ViewportPanel = "Viewport", HierarchyPanel = "Hierarchy", InspectorPanel = "Inspector";
     const string AssetsPanel = "Assets", LogPanel = "Log", StatsPanel = "Stats", EnvironmentPanel = "Environment";
@@ -29,18 +29,15 @@ sealed class EditorApp : IDisposable
     readonly LogBuffer _log = new();
     readonly EditorProject _project;
     EditorScene _scene;
-
-    Node? _selected;
+    SceneLibrary _library;
     ImTextureRef? _viewportTexture;
     int _viewportWidth = 1280, _viewportHeight = 720;
     bool _layoutBuilt;
     bool _showHierarchy = true, _showInspector = true, _showAssets = true, _showLog = true, _showStats = true, _showEnvironment = true;
     ImGuiID _inspectorDock;
     int _dragAxis = -1;
-    readonly ImInputString _nameEdit = new(128);
     readonly ImInputString _saveAsEdit = new(128);
-    Node? _nameEditFor;
-    List<string> _assetFiles = [];
+    List<string> _assetFiles = [], _sceneFiles = [];
     double _assetsScanned = -10;
 
     public EditorApp(EditorProject project)
@@ -67,10 +64,11 @@ sealed class EditorApp : IDisposable
         _view = new SceneView(_gpu, _shaders, project);
         _view.AssetReady += Window.Wake;
 
-        var main = Path.Combine(project.ScenesPath, "main.scene.json");
-        _scene = File.Exists(main) ? EditorScene.Load(main) : new EditorScene { Path = main };
+        _library = new SceneLibrary(project.Root);
+        var main = SceneLibrary.Normalize(Path.Combine(project.Scenes, "main.scene.json"));
+        _scene = File.Exists(project.Absolute(main)) ? LoadScene(main) : EditorScene.New(_library, main);
         UseSceneCamera();
-        Log.Info("editor", $"project {project.Name} at {project.Root}, scene {project.Relative(_scene.Path!)}");
+        Log.Info("editor", $"project {project.Name} at {project.Root}, scene {_scene.Path}");
     }
 
     /// <summary>Opens a script in the Script panel: a path relative to the project, optionally with :line.</summary>
@@ -87,12 +85,18 @@ sealed class EditorApp : IDisposable
 
     (string File, int Line)? _pendingScript;
 
+    /// <summary>Selects a node by name.</summary>
     public void Select(string name)
     {
-        _selected = _scene.Objects.FirstOrDefault(o => o.Name == name);
-        if (_selected == null)
-            Log.Error("editor", $"no object called {name} in the scene");
+        var e = _scene.World.All().FirstOrDefault(n => _scene.World.Name(n) == name);
+        if (e.IsNone)
+            Log.Error("editor", $"no node called {name} in the scene");
+        _scene.Select(e);
+        _focusInspector = e.IsNone ? 0 : 3; // a few frames: on the first, docking isn't set up yet
+        _revealSelection = true;
     }
+
+    int _focusInspector;
 
     /// <summary>For checking the editor without a person: save the window to a PNG after a while, then quit.</summary>
     public (string Path, double After)? Screenshot;
@@ -114,7 +118,7 @@ sealed class EditorApp : IDisposable
             // on Wayland each presented frame wakes the event wait again, so waiting isn't enough.
             Window.PollEvents();
             var t = clock.Elapsed.TotalSeconds;
-            var changed = _scene.Objects.Any(o => o.Playing) || t - lastActivity < 0.5 || _logChanged || _view.Loading || Screenshot != null;
+            var changed = Animating() || t - lastActivity < 0.5 || _logChanged || _view.Loading || Screenshot != null;
             if (!changed && t - lastFrame < 1.0)
             {
                 Window.WaitEvents(1.0 - (t - lastFrame));
@@ -139,7 +143,7 @@ sealed class EditorApp : IDisposable
 
             _ui.NewFrame();
             DrawUi();
-            _view.Render(cmd, _scene, _selected, dt, now);
+            _view.Render(cmd, _scene, dt, now);
             _ui.Render(cmd);
             var shoot = Screenshot is { } shot && now >= shot.After;
             _gpu.EndFrame(cmd, shoot ? capture : null, endRendering: false);
@@ -150,16 +154,40 @@ sealed class EditorApp : IDisposable
             }
 
             _window.Title = $"Trinity Editor - {_project.Name} - {Path.GetFileName(_scene.Path)}{(_scene.Dirty ? " *" : "")}";
+            if (_scene.Dirty && now - _autosaved > 120)
+                Autosave(now);
         }
 
         Log.Written -= WakeOnLog;
         _scripts.KeepUnsaved();
-        if (_scene.Dirty && _scene.Path != null)
+        if (_scene.Dirty)
+            Log.Warn("editor", $"unsaved changes kept in {Autosave(0)}");
+    }
+
+    double _autosaved;
+
+    /// <summary>Writes unsaved changes beside the scene (not over it), every couple of minutes and on quit.</summary>
+    string Autosave(double now)
+    {
+        _autosaved = now;
+        var backup = _scene.Path.Replace(".scene.json", ".autosave.scene.json");
+        try
         {
-            var backup = _scene.Path.Replace(".scene.json", ".autosave.scene.json");
-            _scene.Save(backup);
-            Log.Warn("editor", $"unsaved changes kept in {_project.Relative(backup)}");
+            _library.Save(backup, _scene.ToDocument());
         }
+        catch (Exception e)
+        {
+            Log.Error("editor", $"autosave failed: {e.Message}");
+        }
+        return backup;
+    }
+
+    bool Animating()
+    {
+        foreach (ref var a in _scene.World.Store<Animator>().Components)
+            if (!a.Paused)
+                return true;
+        return false;
     }
 
     volatile bool _logChanged;
@@ -210,6 +238,9 @@ sealed class EditorApp : IDisposable
         if (_showLog) LogWindow();
         if (_showStats) Stats();
         if (_showEnvironment) EnvironmentWindow();
+        // Edits from one drag or one text entry are one undo step: it ends when nothing is being edited
+        if (!ImGui.IsAnyItemActive() && _dragAxis < 0)
+            _scene.CloseEdit();
     }
 
     /// <summary>Hierarchy left, inspector and stats right, assets and log below, viewport in the middle.</summary>
@@ -241,14 +272,12 @@ sealed class EditorApp : IDisposable
             if (ImGui.MenuItem("New scene", "Ctrl+N")) NewScene();
             if (ImGui.BeginMenu("Open scene"))
             {
-                var scenes = Directory.Exists(_project.ScenesPath)
-                    ? Directory.GetFiles(_project.ScenesPath, "*.scene.json").Order().ToArray()
-                    : [];
-                if (scenes.Length == 0)
+                ScanFiles();
+                if (_sceneFiles.Count == 0)
                     ImGui.TextDisabled("No scenes yet");
-                foreach (var s in scenes)
-                    if (ImGui.MenuItem(Path.GetFileName(s), default, s == _scene.Path))
-                        OpenScene(s);
+                foreach (var s in _sceneFiles)
+                    if (ImGui.MenuItem(s, default, s == _scene.Path))
+                        OpenScene(_project.Absolute(s));
                 ImGui.EndMenu();
             }
             if (ImGui.MenuItem("Save scene", "Ctrl+S")) SaveScene();
@@ -259,9 +288,15 @@ sealed class EditorApp : IDisposable
         }
         if (ImGui.BeginMenu("Edit"))
         {
-            if (ImGui.MenuItem("Duplicate", "Ctrl+D", false, _selected != null)) Duplicate();
-            if (ImGui.MenuItem("Delete", "Del", false, _selected != null)) Delete();
-            if (ImGui.MenuItem("Frame selected", "F", false, _selected != null)) _view.Frame(_selected!);
+            var any = _scene.Selection.Count > 0;
+            if (ImGui.MenuItem(_scene.UndoLabel is { } u ? $"Undo {u}" : "Undo", "Ctrl+Z", false, _scene.CanUndo)) _scene.Undo();
+            if (ImGui.MenuItem(_scene.RedoLabel is { } r ? $"Redo {r}" : "Redo", "Ctrl+Y", false, _scene.CanRedo)) _scene.Redo();
+            ImGui.Separator();
+            if (ImGui.MenuItem("New node", "Ctrl+Shift+N")) _scene.CreateNode("Node", _scene.Primary);
+            if (ImGui.MenuItem("Rename", "F2", false, !_scene.Primary.IsNone)) _renameRequested = true;
+            if (ImGui.MenuItem("Duplicate", "Ctrl+D", false, any)) _scene.Duplicate(_scene.Selection);
+            if (ImGui.MenuItem("Delete", "Del", false, any)) Report(_scene.Delete(_scene.Selection));
+            if (ImGui.MenuItem("Frame selected", "F", false, !_scene.Primary.IsNone)) _view.Frame(_scene.World, _scene.Primary);
             ImGui.EndMenu();
         }
         if (ImGui.BeginMenu("View"))
@@ -324,7 +359,7 @@ sealed class EditorApp : IDisposable
         }
         if (openSaveAs)
         {
-            _saveAsEdit.SetValue(Path.GetFileName(_scene.Path ?? "main.scene.json").Replace(".scene.json", "").AsSpan());
+            _saveAsEdit.SetValue(Path.GetFileName(_scene.Path).Replace(".scene.json", "").AsSpan());
             ImGui.OpenPopup("Save scene as");
         }
         if (ImGui.BeginPopup("Save scene as"))
@@ -333,7 +368,7 @@ sealed class EditorApp : IDisposable
             var enter = ImGui.InputText("##name", _saveAsEdit, ImGuiInputTextFlags.EnterReturnsTrue);
             if ((ImGui.Button("Save") || enter) && !_saveAsEdit.IsEmpty)
             {
-                SaveScene(Path.Combine(_project.ScenesPath, _saveAsEdit.ToString() + ".scene.json"));
+                SaveScene(SceneLibrary.Normalize(Path.Combine(_project.Scenes, _saveAsEdit.ToString() + ".scene.json")));
                 ImGui.CloseCurrentPopup();
             }
             ImGui.EndPopup();
@@ -351,10 +386,14 @@ sealed class EditorApp : IDisposable
         if (io.WantTextInput || _scripts.HasFocus)
             return;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.S)) SaveScene();
-        if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.N)) NewScene();
+        if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.N)) NewScene();
+        if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.N)) _scene.CreateNode("Node", _scene.Primary);
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.Q)) _window.ShouldClose = true;
-        if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.D) && _selected != null) Duplicate();
-        if (ImGui.IsKeyPressed(ImGuiKey.Delete) && _selected != null) Delete();
+        if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.Z)) _scene.Undo();
+        if (io.KeyCtrl && (ImGui.IsKeyPressed(ImGuiKey.Y) || io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.Z))) _scene.Redo();
+        if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.D) && _scene.Selection.Count > 0) _scene.Duplicate(_scene.Selection);
+        if (ImGui.IsKeyPressed(ImGuiKey.Delete) && _scene.Selection.Count > 0) Report(_scene.Delete(_scene.Selection));
+        if (ImGui.IsKeyPressed(ImGuiKey.F2) && !_scene.Primary.IsNone) _renameRequested = true;
     }
 
     /// <summary>Saves the scene and scripts, then runs the game, as Godot does.</summary>
@@ -409,58 +448,79 @@ sealed class EditorApp : IDisposable
             }
             if (io.MouseWheel != 0)
                 cam.Distance = Math.Clamp(cam.Distance * MathF.Pow(0.88f, io.MouseWheel), 0.3f, 1500f);
-            if (ImGui.IsKeyPressed(ImGuiKey.F) && _selected != null && !io.WantTextInput)
-                _view.Frame(_selected);
+            if (ImGui.IsKeyPressed(ImGuiKey.F) && !_scene.Primary.IsNone && !io.WantTextInput)
+                _view.Frame(_scene.World, _scene.Primary);
         }
         ImGui.End();
         ImGui.PopStyleVar();
     }
 
-    /// <summary>Hovering, grabbing and dragging the selection's move arrows; a click elsewhere picks.</summary>
+    /// <summary>
+    /// Hovering, grabbing and dragging the selected node's move arrows (in world axes; the node's local
+    /// position changes to match, under whatever parent it has). A drag is one undo step. A click
+    /// elsewhere picks (with Ctrl, adds to or removes from the selection).
+    /// </summary>
     void MoveGizmo(Vector2 mouse, bool hovered)
     {
         var io = ImGui.GetIO();
+        var w = _scene.World;
+        var selected = _scene.Primary;
         if (_dragAxis >= 0)
         {
-            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left) || _selected == null)
+            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left) || !w.IsAlive(selected))
             {
                 _dragAxis = -1;
+                _scene.CloseEdit();
                 return;
             }
-            var (p0, p1) = GizmoAxisOnScreen(_selected, _dragAxis);
+            var at = w.WorldPosition(selected);
+            var (p0, p1) = GizmoAxisOnScreen(at, _dragAxis);
             if (p0 is { } a && p1 is { } b)
             {
                 var s = b - a;
                 var t = Vector2.Dot(new Vector2(io.MouseDelta.X, io.MouseDelta.Y), s) / MathF.Max(s.LengthSquared(), 1);
                 ReadOnlySpan<Vector3> axes = [Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ];
-                _selected.Position += axes[_dragAxis] * _view.GizmoLength(_selected) * t;
-                _scene.Dirty = true;
+                var delta = axes[_dragAxis] * _view.GizmoLength(at) * t;
+                // World movement into the parent's space
+                var parent = w.Parent(selected);
+                if (!parent.IsNone && Matrix4x4.Invert(w.WorldMatrix(parent), out var inv))
+                    delta = Vector3.TransformNormal(delta, inv);
+                if (delta != Vector3.Zero)
+                    Report(_scene.SetProperty(selected, "Position", SceneSchema.Vector(w.Position(selected) + delta), merge: true));
             }
             return;
         }
-        _view.GizmoAxis = hovered && _selected != null ? HoveredAxis(_selected, mouse) : -1;
+        _view.GizmoAxis = hovered && w.IsAlive(selected) ? HoveredAxis(w.WorldPosition(selected), mouse) : -1;
         if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
             if (_view.GizmoAxis >= 0)
+            {
                 _dragAxis = _view.GizmoAxis;
+                _scene.CloseEdit();
+            }
             else
-                _selected = _view.Pick(_scene, _view.Ray(mouse));
+            {
+                var picked = _view.Pick(w, _view.Ray(mouse));
+                if (!picked.IsNone || !io.KeyCtrl)
+                    _scene.Select(picked, add: io.KeyCtrl);
+                _revealSelection = !picked.IsNone;
+            }
         }
     }
 
-    (Vector2?, Vector2?) GizmoAxisOnScreen(Node o, int axis)
+    (Vector2?, Vector2?) GizmoAxisOnScreen(Vector3 at, int axis)
     {
         ReadOnlySpan<Vector3> axes = [Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ];
-        return (_view.ToScreen(o.Position), _view.ToScreen(o.Position + axes[axis] * _view.GizmoLength(o)));
+        return (_view.ToScreen(at), _view.ToScreen(at + axes[axis] * _view.GizmoLength(at)));
     }
 
-    int HoveredAxis(Node o, Vector2 mouse)
+    int HoveredAxis(Vector3 at, Vector2 mouse)
     {
         var best = -1;
         var bestDistance = 8f; // pixels
         for (var a = 0; a < 3; a++)
         {
-            if (GizmoAxisOnScreen(o, a) is not ({ } p0, { } p1))
+            if (GizmoAxisOnScreen(at, a) is not ({ } p0, { } p1))
                 continue;
             var s = p1 - p0;
             var t = Math.Clamp(Vector2.Dot(mouse - p0, s) / MathF.Max(s.LengthSquared(), 1), 0, 1);
@@ -471,6 +531,12 @@ sealed class EditorApp : IDisposable
         return best;
     }
 
+    static void Report(string? error)
+    {
+        if (error != null)
+            Log.Warn("editor", error);
+    }
+
     void EnvironmentWindow()
     {
         ImGui.SetNextWindowDockID(_inspectorDock, ImGuiCond.FirstUseEver);
@@ -479,7 +545,8 @@ sealed class EditorApp : IDisposable
             ImGui.End();
             return;
         }
-        var e = _scene.File.Environment;
+        var e = _scene.Environment;
+        var before = _scene.EnvironmentJson();
         var changed = false;
         ImGui.SeparatorText("Sun");
         var azimuth = e.SunAzimuth;
@@ -510,256 +577,10 @@ sealed class EditorApp : IDisposable
             if (ImGui.Selectable("ACES", aces)) { e.ToneMapper = "ACES"; changed = true; }
             ImGui.EndCombo();
         }
+        // A drag is one undo step: edits merge until no widget is active (see DrawUi)
         if (changed)
-            _scene.Dirty = true;
+            _scene.EnvironmentChanged(before, merge: true);
         ImGui.End();
-    }
-
-    void Hierarchy()
-    {
-        ImGui.Begin(HierarchyPanel, ref _showHierarchy);
-        if (_scene.Objects.Count == 0)
-            ImGui.TextDisabled("Empty scene. Double-click a model in Assets to place it.");
-        for (var i = 0; i < _scene.Objects.Count; i++)
-        {
-            var o = _scene.Objects[i];
-            ImGui.PushID(i);
-            if (ImGui.Selectable(o.Name, o == _selected))
-                _selected = o;
-            if (!string.IsNullOrEmpty(o.Script))
-            {
-                ImGui.SameLine();
-                ImGui.TextDisabled(o.Script);
-            }
-            if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
-                _view.Frame(o);
-            if (ImGui.BeginPopupContextItem())
-            {
-                _selected = o;
-                if (ImGui.MenuItem("Frame", "F")) _view.Frame(o);
-                if (ImGui.MenuItem("Duplicate", "Ctrl+D")) Duplicate();
-                if (ImGui.MenuItem("Delete", "Del")) Delete();
-                ImGui.EndPopup();
-            }
-            ImGui.PopID();
-        }
-        ImGui.End();
-    }
-
-    void Inspector()
-    {
-        ImGui.Begin(InspectorPanel, ref _showInspector);
-        _inspectorDock = ImGui.GetWindowDockID();
-        if (_selected is not { } o)
-        {
-            ImGui.TextDisabled("Nothing selected");
-            ImGui.End();
-            return;
-        }
-
-        if (_nameEditFor != o)
-        {
-            _nameEdit.SetValue(o.Name.AsSpan());
-            _nameEditFor = o;
-        }
-        if (ImGui.InputText("Name", _nameEdit))
-        {
-            o.Name = _nameEdit.ToString();
-            _scene.Dirty = true;
-        }
-        ImGui.TextDisabled(o.Model);
-
-        ImGui.SeparatorText("Transform");
-        var position = new float3(o.Position.X, o.Position.Y, o.Position.Z);
-        if (ImGui.DragFloat3("Position", ref position, 0.05f))
-        {
-            o.Position = new Vector3(position.X, position.Y, position.Z);
-            _scene.Dirty = true;
-        }
-        var rotation = new float3(o.Rotation.X, o.Rotation.Y, o.Rotation.Z);
-        if (ImGui.DragFloat3("Rotation", ref rotation, 0.5f))
-        {
-            o.Rotation = new Vector3(rotation.X, rotation.Y, rotation.Z);
-            _scene.Dirty = true;
-        }
-        var scale = o.Scale;
-        if (ImGui.DragFloat("Scale", ref scale, 0.01f, 0.01f, 1000f))
-        {
-            o.Scale = scale;
-            _scene.Dirty = true;
-        }
-
-        ScriptSection(o);
-
-        if (_view.Model(o.Model) is { } model)
-        {
-            ImGui.SeparatorText("Animation");
-            if (!model.Model.IsRigged)
-            {
-                ImGui.TextDisabled("Static model");
-            }
-            else
-            {
-                var current = Array.IndexOf(model.ClipNames, o.Clip) is var c and >= 0 ? model.ClipNames[c] : model.ClipNames[0];
-                if (ImGui.BeginCombo("Clip", current))
-                {
-                    foreach (var name in model.ClipNames)
-                        if (ImGui.Selectable(name, name == current))
-                        {
-                            o.Clip = name;
-                            o.Time = 0;
-                            _scene.Dirty = true;
-                        }
-                    ImGui.EndCombo();
-                }
-                var playing = o.Playing;
-                if (ImGui.Checkbox("Playing", ref playing))
-                {
-                    o.Playing = playing;
-                    _scene.Dirty = true;
-                }
-                ImGui.SameLine();
-                if (ImGui.Button("Restart"))
-                    o.Time = 0;
-                var speed = o.Speed;
-                if (ImGui.DragFloat("Speed", ref speed, 0.01f, 0f, 10f))
-                {
-                    o.Speed = speed;
-                    _scene.Dirty = true;
-                }
-                var clip = model.Model.Clips[Math.Max(0, Array.IndexOf(model.ClipNames, current))];
-                ImGui.TextDisabled($"{clip.Duration:F2} s, {clip.FrameCount} baked frames");
-            }
-
-            ImGui.SeparatorText("Model");
-            ImGui.TextDisabled($"{model.Triangles:N0} triangles, {model.Model.Vertices.Length:N0} vertices");
-            if (model.Model.IsRigged)
-                ImGui.TextDisabled($"{model.Model.JointCount} bones, far version {model.Model.Lod1.IndexCount / 3:N0} triangles");
-        }
-        ImGui.End();
-    }
-
-    // --- Scripts in the Inspector ---------------------------------------------------------------------
-
-    static readonly float4 Warning = ImGuiHost.Color(0.95f, 0.72f, 0.33f);
-
-    void ScriptSection(Node o)
-    {
-        ImGui.SeparatorText("Script");
-        var current = o.Script ?? "";
-        if (ImGui.BeginCombo("Script", current.Length == 0 ? "None" : current))
-        {
-            if (ImGui.Selectable("None", current.Length == 0))
-                SetScript(o, null);
-            foreach (var s in _scripts.Index.All)
-                if (ImGui.Selectable(s.Name, s.Name == current))
-                    SetScript(o, s.Name);
-            ImGui.Separator();
-            if (ImGui.Selectable("New script..."))
-                _scripts.NewScript(ScriptPanel.Clean(o.Name), name => SetScript(o, name));
-            ImGui.EndCombo();
-        }
-        if (current.Length == 0)
-        {
-            ImGui.TextDisabled("Attach a script to give this object behaviour");
-            return;
-        }
-        if (_scripts.Index.Find(current) is not { } info)
-        {
-            ImGui.TextColored(Warning, $"No script class '{current}' in the project");
-            return;
-        }
-        if (ImGui.Button("Open script"))
-            _scripts.Open(info.File, info.Line);
-        foreach (var f in info.Fields)
-            ScriptField(o, f);
-        // Values saved for fields the script no longer has
-        foreach (var name in o.Fields?.Keys.Where(k => info.Fields.All(f => f.Name != k)).ToList() ?? [])
-        {
-            ImGui.TextColored(Warning, $"{name}: not in {current} any more");
-            ImGui.SameLine();
-            if (ImGui.SmallButton($"Remove##{name}"))
-            {
-                o.Fields!.Remove(name);
-                _scene.Dirty = true;
-            }
-        }
-    }
-
-    void SetScript(Node o, string? name)
-    {
-        if (o.Script == name)
-            return;
-        o.Script = name;
-        o.Fields = null;
-        _scene.Dirty = true;
-    }
-
-    /// <summary>One script field: the value saved in the scene, or the script's own default until it's changed.</summary>
-    void ScriptField(Node o, ScriptField f)
-    {
-        var saved = o.Fields != null && o.Fields.TryGetValue(f.Name, out var v) ? v : (JsonElement?)null;
-        var label = Words(f.Name);
-        var inv = CultureInfo.InvariantCulture;
-        string? json = null;
-        ImGui.PushID(f.Name);
-        switch (f.Type)
-        {
-            case "float" or "double":
-                var x = saved is { ValueKind: JsonValueKind.Number } n ? n.GetSingle() : Convert.ToSingle(f.Default, inv);
-                if (ImGui.DragFloat(label, ref x, 0.05f))
-                    json = x.ToString("R", inv);
-                break;
-            case "int":
-                var i = saved is { ValueKind: JsonValueKind.Number } k && k.TryGetInt32(out var ki) ? ki : (int)f.Default;
-                if (ImGui.DragInt(label, ref i))
-                    json = i.ToString(inv);
-                break;
-            case "bool":
-                var b = saved is { ValueKind: JsonValueKind.True or JsonValueKind.False } t ? t.GetBoolean() : (bool)f.Default;
-                if (ImGui.Checkbox(label, ref b))
-                    json = b ? "true" : "false";
-                break;
-            case "string":
-                var key = $"{o.GetHashCode()}/{f.Name}";
-                var text = saved is { ValueKind: JsonValueKind.String } st ? st.GetString() ?? "" : (string)f.Default;
-                if (!_stringFields.TryGetValue(key, out var edit))
-                {
-                    edit = new ImInputString(256);
-                    edit.SetValue(text.AsSpan());
-                    _stringFields[key] = edit;
-                }
-                if (ImGui.InputText(label, edit))
-                    json = "\"" + JsonEncodedText.Encode(edit.ToString()) + "\"";
-                break;
-            case "Vector3":
-                var d = (Vector3)f.Default;
-                var vec = saved is { ValueKind: JsonValueKind.Array } a && a.GetArrayLength() == 3
-                    ? new float3(a[0].GetSingle(), a[1].GetSingle(), a[2].GetSingle())
-                    : new float3(d.X, d.Y, d.Z);
-                if (ImGui.DragFloat3(label, ref vec, 0.05f))
-                    json = $"[{vec.X.ToString("R", inv)}, {vec.Y.ToString("R", inv)}, {vec.Z.ToString("R", inv)}]";
-                break;
-        }
-        if (json != null)
-        {
-            o.Fields ??= [];
-            o.Fields[f.Name] = JsonDocument.Parse(json).RootElement.Clone();
-            _scene.Dirty = true;
-        }
-        if (saved != null)
-        {
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Reset"))
-            {
-                o.Fields!.Remove(f.Name);
-                _stringFields.Remove($"{o.GetHashCode()}/{f.Name}");
-                _scene.Dirty = true;
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Back to the script's default");
-        }
-        ImGui.PopID();
     }
 
     /// <summary>"DegreesPerSecond" as "Degrees per second".</summary>
@@ -776,24 +597,49 @@ sealed class EditorApp : IDisposable
         return sb.ToString();
     }
 
+    void ScanFiles()
+    {
+        if (ImGui.GetTime() - _assetsScanned < 2)
+            return;
+        _assetsScanned = ImGui.GetTime();
+        _assetFiles = Directory.Exists(_project.AssetsPath)
+            ? Directory.EnumerateFiles(_project.AssetsPath, "*", SearchOption.AllDirectories).Select(f => SceneLibrary.Normalize(_project.Relative(f))).Order().ToList()
+            : [];
+        _sceneFiles = Directory.Exists(_project.ScenesPath)
+            ? Directory.EnumerateFiles(_project.ScenesPath, "*.scene.json", SearchOption.AllDirectories)
+                .Where(f => !f.EndsWith(".autosave.scene.json", StringComparison.Ordinal))
+                .Select(f => SceneLibrary.Normalize(_project.Relative(f))).Order().ToList()
+            : [];
+    }
+
+    static bool IsModel(string file) =>
+        file.EndsWith(".glb", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase);
+
     void Assets()
     {
         ImGui.Begin(AssetsPanel, ref _showAssets);
-        if (ImGui.Button("Refresh") || ImGui.GetTime() - _assetsScanned > 5)
-        {
-            _assetsScanned = ImGui.GetTime();
-            _assetFiles = Directory.Exists(_project.AssetsPath)
-                ? Directory.EnumerateFiles(_project.AssetsPath, "*", SearchOption.AllDirectories).Select(_project.Relative).Order().ToList()
-                : [];
-        }
+        if (ImGui.Button("Refresh"))
+            _assetsScanned = -10;
+        ScanFiles();
         ImGui.SameLine();
-        ImGui.TextDisabled($"{_project.Relative(_project.AssetsPath)}/  -  double-click a model to place it");
+        ImGui.TextDisabled("double-click a model to place it, a scene to instance it here; right-click a scene to open it");
         ImGui.Separator();
         ImGui.BeginChild("files");
+        foreach (var file in _sceneFiles)
+        {
+            ImGui.Selectable(file, file == _scene.Path);
+            if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                InstanceScene(file);
+            if (ImGui.BeginPopupContextItem(file))
+            {
+                if (ImGui.MenuItem("Open")) OpenScene(_project.Absolute(file));
+                if (ImGui.MenuItem("Instance here", default, false, file != _scene.Path)) InstanceScene(file);
+                ImGui.EndPopup();
+            }
+        }
         foreach (var file in _assetFiles)
         {
-            var isModel = file.EndsWith(".glb", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase);
-            if (!isModel)
+            if (!IsModel(file))
             {
                 ImGui.TextDisabled(file);
                 continue;
@@ -836,7 +682,7 @@ sealed class EditorApp : IDisposable
         var io = ImGui.GetIO();
         ImGui.Text($"{io.Framerate:F0} fps, {1000f / Math.Max(1f, io.Framerate):F2} ms");
         ImGui.TextDisabled(_gpu.GpuName);
-        ImGui.Text($"{_scene.Objects.Count} objects, {_view.TrianglesDrawn:N0} triangles");
+        ImGui.Text($"{_scene.World.Count} nodes, {_view.TrianglesDrawn:N0} triangles");
         ImGui.Text($"Viewport {_viewportWidth} x {_viewportHeight}");
         var cam = _view.Camera;
         ImGui.TextDisabled($"Camera at {cam.Target.X:F1}, {cam.Target.Y:F1}, {cam.Target.Z:F1}, {cam.Distance:F1} m out");
@@ -855,47 +701,31 @@ sealed class EditorApp : IDisposable
 
     void Place(string modelPath)
     {
-        var name = Path.GetFileNameWithoutExtension(modelPath);
-        var count = _scene.Objects.Count(o => o.Name.StartsWith(name));
         var model = _view.Model(modelPath);
-        var o = new Node
+        var clip = model?.ClipNames.FirstOrDefault(c => c == "idle") ?? model?.ClipNames.FirstOrDefault();
+        var e = _scene.Place(modelPath, new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z), clip);
+        Log.Info("editor", $"placed {_scene.World.Name(e)}");
+    }
+
+    void InstanceScene(string scenePath)
+    {
+        if (scenePath == _scene.Path)
         {
-            Name = count == 0 ? name : $"{name} {count + 1}",
-            Model = modelPath,
-            Position = new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z),
-            Clip = model?.ClipNames.FirstOrDefault(c => c == "idle") ?? model?.ClipNames.FirstOrDefault() ?? "",
-        };
-        _scene.Objects.Add(o);
-        _scene.Dirty = true;
-        _selected = o;
-        Log.Info("editor", $"placed {o.Name}");
-    }
-
-    void Duplicate()
-    {
-        if (_selected is not { } s)
+            Log.Warn("editor", "a scene can't contain itself");
             return;
-        var copy = s.Clone();
-        copy.Name = s.Name + " copy";
-        copy.Position = s.Position + new Vector3(1, 0, 0);
-        _scene.Objects.Add(copy);
-        _scene.Dirty = true;
-        _selected = copy;
-    }
-
-    void Delete()
-    {
-        if (_selected is not { } s)
-            return;
-        _scene.Objects.Remove(s);
-        _scene.Dirty = true;
-        _selected = null;
+        }
+        var e = _scene.InstantiateScene(scenePath, new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z), out var problems);
+        foreach (var error in problems.Errors)
+            Log.Error("scene", error);
+        foreach (var warning in problems.Warnings)
+            Log.Warn("scene", warning);
+        Log.Info("editor", $"added {_scene.World.Name(e)}, an instance of {scenePath}");
     }
 
     /// <summary>Starts the viewport where the scene's camera is, if it has one.</summary>
     void UseSceneCamera()
     {
-        if (_scene.File.Camera is { } c)
+        if (_scene.Camera is { } c)
             _view.Camera = new OrbitCamera
             {
                 Target = c.Target,
@@ -905,25 +735,51 @@ sealed class EditorApp : IDisposable
             };
     }
 
-    void NewScene()
+    EditorScene LoadScene(string relative)
     {
-        _scene = new EditorScene { Path = Path.Combine(_project.ScenesPath, "untitled.scene.json") };
-        _selected = null;
+        var scene = EditorScene.Load(_library, relative, out var problems);
+        foreach (var error in problems.Errors)
+            Log.Error("scene", error);
+        foreach (var warning in problems.Warnings)
+            Log.Warn("scene", warning);
+        return scene;
     }
 
+    void NewScene()
+    {
+        KeepUnsaved();
+        _scene = EditorScene.New(_library, SceneLibrary.Normalize(Path.Combine(_project.Scenes, "untitled.scene.json")));
+    }
+
+    /// <summary>Opens a scene file (an absolute path, or relative to the project).</summary>
     public void OpenScene(string path)
     {
-        _scene = EditorScene.Load(path);
-        _selected = null;
+        KeepUnsaved();
+        // A fresh library, so scenes changed outside the editor are read again
+        _library = new SceneLibrary(_project.Root);
+        _scene = LoadScene(SceneLibrary.Normalize(_project.Relative(_project.Absolute(path))));
         UseSceneCamera();
-        Log.Info("editor", $"opened {_project.Relative(path)}");
+        Log.Info("editor", $"opened {_scene.Path}");
+    }
+
+    void KeepUnsaved()
+    {
+        if (_scene.Dirty)
+            Log.Warn("editor", $"unsaved changes to {_scene.Path} kept in {Autosave(ImGui.GetTime())}");
     }
 
     void SaveScene(string? path = null)
     {
-        path ??= _scene.Path ?? Path.Combine(_project.ScenesPath, "main.scene.json");
-        _scene.Save(path);
-        Log.Info("editor", $"saved {_project.Relative(path)}");
+        try
+        {
+            _scene.Save(path);
+            _autosaved = ImGui.GetTime();
+            Log.Info("editor", $"saved {_scene.Path}");
+        }
+        catch (Exception e)
+        {
+            Log.Error("editor", $"couldn't save {_scene.Path}: {e.Message}");
+        }
     }
 
     public void Dispose()

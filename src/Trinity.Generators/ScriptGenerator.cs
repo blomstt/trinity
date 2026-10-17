@@ -23,6 +23,7 @@ public sealed class ScriptGenerator : IIncrementalGenerator
         ["bool"] = "v.GetBoolean()",
         ["string"] = "v.GetString() ?? \"\"",
         ["System.Numerics.Vector3"] = "global::Trinity.Scenes.Scripts.ReadVector3(v)",
+        ["Trinity.Scenes.Node"] = "global::Trinity.Scenes.Scripts.ReadNode(v)",
     };
 
     public void Initialize(IncrementalGeneratorInitializationContext context)

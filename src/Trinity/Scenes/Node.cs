@@ -5,56 +5,135 @@ using System.Text.Json.Serialization;
 namespace Trinity.Scenes;
 
 /// <summary>
-/// One thing in a scene: a model placed in the world, optionally playing an animation clip and running a
-/// <see cref="Scenes.Script"/>. The same type is saved in scene files, edited by Trinity Editor and run by games.
+/// A node in a scene, as scripts and game code use it: a light handle (a world and an entity id) with
+/// the node's name, transform, hierarchy and components. Copying it copies the handle, not the node.
+/// Using a node after it's destroyed throws, and <see cref="IsValid"/> says whether it still exists.
+/// <code>
+/// Node.Position += new Vector3(0, 1, 0);
+/// var door = Node.Find("House/Front door");
+/// ref var animator = ref door.Get&lt;Animator&gt;();
+/// </code>
 /// </summary>
-public sealed class Node
+public readonly struct Node(World world, EntityId id) : IEquatable<Node>
 {
-    public string Name { get; set; } = "Node";
-    public string Model { get; set; } = ""; // relative to the project root
-    public Vector3 Position { get; set; }
-    public Vector3 Rotation { get; set; } // degrees, X then Y then Z
-    public float Scale { get; set; } = 1;
-    public string Clip { get; set; } = "";
-    public float Speed { get; set; } = 1;
-    public bool Playing { get; set; } = true;
+    public readonly World World = world;
+    public readonly EntityId Id = id;
 
-    /// <summary>Class name of the script attached, if any.</summary>
-    public string? Script { get; set; }
+    public static readonly Node None = default;
 
-    /// <summary>The script's field values set in the editor; fields not listed keep the script's defaults.</summary>
-    public Dictionary<string, JsonElement>? Fields { get; set; }
+    public bool IsValid => World != null && World.IsAlive(Id);
 
-    /// <summary>Seconds into the clip; advanced while <see cref="Playing"/>.</summary>
-    [JsonIgnore]
-    public float Time;
+    public string Name
+    {
+        get => World.Name(Id);
+        set => World.SetName(Id, value);
+    }
 
-    /// <summary>The running script, once the scene has started.</summary>
-    [JsonIgnore]
-    public Script? Behaviour { get; internal set; }
+    /// <summary>Position relative to the parent.</summary>
+    public Vector3 Position
+    {
+        get => World.Position(Id);
+        set => World.SetPosition(Id, value);
+    }
 
-    public Matrix4x4 Transform =>
-        Matrix4x4.CreateScale(Scale)
-        * Matrix4x4.CreateRotationX(float.DegreesToRadians(Rotation.X))
-        * Matrix4x4.CreateRotationY(float.DegreesToRadians(Rotation.Y))
-        * Matrix4x4.CreateRotationZ(float.DegreesToRadians(Rotation.Z))
-        * Matrix4x4.CreateTranslation(Position);
+    /// <summary>Rotation relative to the parent, in degrees, applied X, then Y, then Z.</summary>
+    public Vector3 Rotation
+    {
+        get => World.Rotation(Id);
+        set => World.SetRotation(Id, value);
+    }
 
-    /// <summary>A copy of the saved state, without the running script.</summary>
-    public Node Clone() =>
-        new()
+    public Vector3 Scale
+    {
+        get => World.Scale(Id);
+        set => World.SetScale(Id, value);
+    }
+
+    public bool Hidden
+    {
+        get => World.Hidden(Id);
+        set => World.SetHidden(Id, value);
+    }
+
+    public Matrix4x4 WorldMatrix => World.WorldMatrix(Id);
+    public Vector3 WorldPosition => World.WorldPosition(Id);
+
+    /// <summary>The way the node faces in the world: its -Z axis.</summary>
+    public Vector3 Forward
+    {
+        get
         {
-            Name = Name,
-            Model = Model,
-            Position = Position,
-            Rotation = Rotation,
-            Scale = Scale,
-            Clip = Clip,
-            Speed = Speed,
-            Playing = Playing,
-            Script = Script,
-            Fields = Fields == null ? null : new Dictionary<string, JsonElement>(Fields),
-        };
+            var m = WorldMatrix;
+            return Vector3.Normalize(-new Vector3(m.M31, m.M32, m.M33));
+        }
+    }
+
+    public Node Parent => new(World, World.Parent(Id));
+
+    public List<Node> Children
+    {
+        get
+        {
+            var list = new List<Node>();
+            foreach (var c in World.Children(Id))
+                list.Add(new Node(World, c));
+            return list;
+        }
+    }
+
+    /// <summary>The first child with this name, or <see cref="None"/>.</summary>
+    public Node Child(string name)
+    {
+        foreach (var c in World.Children(Id))
+            if (World.Name(c) == name)
+                return new Node(World, c);
+        return None;
+    }
+
+    /// <summary>A descendant by a path of child names, "House/Front door"; <see cref="None"/> if there isn't one.</summary>
+    public Node Find(string path)
+    {
+        var node = this;
+        foreach (var part in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            node = node.Child(part);
+            if (!node.IsValid)
+                return None;
+        }
+        return node;
+    }
+
+    public Node AddChild(string name = "Node") => new(World, World.Create(name, Id));
+
+    public void SetParent(Node parent, bool keepWorld = false) => World.SetParent(Id, parent.Id, keepWorld: keepWorld);
+
+    public bool Has<T>() where T : struct => World.Has<T>(Id);
+    public ref T Get<T>() where T : struct => ref World.Get<T>(Id);
+    public ref T Add<T>(in T component) where T : struct => ref World.Add(Id, component);
+    public void Remove<T>() where T : struct => World.Remove<T>(Id);
+
+    /// <summary>Destroys the node and everything under it (at the end of the current update, if one is running).</summary>
+    public void Destroy() => World.Destroy(Id);
+
+    /// <summary>The animation clip playing (via the <see cref="Animator"/>, added if needed).</summary>
+    public string Clip
+    {
+        get => Has<Animator>() ? Get<Animator>().Clip ?? "" : "";
+        set
+        {
+            if (Has<Animator>())
+                Get<Animator>().Clip = value;
+            else
+                Add(new Animator(value));
+        }
+    }
+
+    public bool Equals(Node other) => ReferenceEquals(World, other.World) && Id == other.Id;
+    public override bool Equals(object? obj) => obj is Node n && Equals(n);
+    public override int GetHashCode() => Id.GetHashCode();
+    public static bool operator ==(Node a, Node b) => a.Equals(b);
+    public static bool operator !=(Node a, Node b) => !a.Equals(b);
+    public override string ToString() => IsValid ? $"{Name} {Id}" : $"(no node) {Id}";
 }
 
 /// <summary>Where a scene's camera starts: orbiting <see cref="Target"/>, angles in degrees.</summary>
@@ -100,30 +179,16 @@ public sealed class SceneEnvironment
     }
 }
 
-/// <summary>A scene as saved: <c>*.scene.json</c>, its nodes, its environment and where the camera starts.</summary>
-public sealed class SceneFile
-{
-    public List<Node> Objects { get; set; } = [];
-    public SceneEnvironment Environment { get; set; } = new();
-    public SceneCamera? Camera { get; set; }
-
-    public static SceneFile Load(string path) =>
-        JsonSerializer.Deserialize(File.ReadAllText(path), SceneJson.Default.SceneFile) ?? new SceneFile();
-
-    public void Save(string path)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        File.WriteAllText(path, JsonSerializer.Serialize(this, SceneJson.Default.SceneFile));
-    }
-}
-
 [JsonSourceGenerationOptions(
     WriteIndented = true,
     PropertyNameCaseInsensitive = true,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     Converters = [typeof(Vector3Converter)]
 )]
-[JsonSerializable(typeof(SceneFile))]
+[JsonSerializable(typeof(SceneDocument))]
+[JsonSerializable(typeof(SceneEnvironment))]
+[JsonSerializable(typeof(SceneCamera))]
+[JsonSerializable(typeof(string))]
 sealed partial class SceneJson : JsonSerializerContext;
 
 /// <summary>Vectors as [x, y, z] arrays, which read better in scene files.</summary>

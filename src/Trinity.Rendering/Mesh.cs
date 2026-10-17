@@ -98,8 +98,18 @@ public sealed class Mesh : IDisposable
 
     public int Triangles => Parts.Where(p => p.Lod == 0).Sum(p => p.IndexCount) / 3;
 
-    /// <summary>Index of a clip by name, or 0.</summary>
-    public int Clip(string name) => Math.Max(0, Array.IndexOf(ClipNames, name));
+    /// <summary>Index of a clip by name, ignoring case; the first clip (with a warning, once per name) if there's no such clip.</summary>
+    public int Clip(string name)
+    {
+        for (var i = 0; i < ClipNames.Length; i++)
+            if (string.Equals(ClipNames[i], name, StringComparison.OrdinalIgnoreCase))
+                return i;
+        if (name.Length > 0 && ClipNames.Length > 0 && _unknownClips.Add(name))
+            Log.Warn("render", $"no clip '{name}' in this model (clips: {string.Join(", ", ClipNames)}); playing {ClipNames[0]}");
+        return 0;
+    }
+
+    readonly HashSet<string> _unknownClips = [];
 
     public void Dispose()
     {

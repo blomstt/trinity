@@ -29,6 +29,7 @@ public sealed class ScriptingTests : IDisposable
                 public bool Loop = true;
                 public string Label = "hi; there";
                 public Vector3 Offset = new Vector3(1, 2, 3);
+                public Node Target;
                 public static float Shared = 9;
                 public readonly float Fixed = 1;
                 float _private = 4;
@@ -47,7 +48,8 @@ public sealed class ScriptingTests : IDisposable
         var mover = Assert.Single(index.All);
         Assert.Equal("Mover", mover.Name);
         Assert.Equal(4, mover.Line);
-        Assert.Equal(["Speed", "Count", "Loop", "Label", "Offset"], mover.Fields.Select(f => f.Name));
+        Assert.Equal(["Speed", "Count", "Loop", "Label", "Offset", "Target"], mover.Fields.Select(f => f.Name));
+        Assert.Equal("Node", mover.Fields[5].Type);
         Assert.Equal(2.5f, mover.Fields[0].Default);
         Assert.Equal(3, mover.Fields[1].Default);
         Assert.Equal(true, mover.Fields[2].Default);
@@ -126,24 +128,24 @@ public sealed class ScriptingTests : IDisposable
     [Fact]
     public void Scene_files_keep_scripts_and_field_values()
     {
-        var path = Path.Combine(_dir, "Scenes", "test.scene.json");
-        var scene = new SceneFile();
-        scene.Objects.Add(new Node
-        {
-            Name = "Spinner",
-            Model = "Assets/a.glb",
-            Position = new Vector3(1, 2, 3),
-            Script = "Spin",
-            Fields = new() { ["DegreesPerSecond"] = JsonDocument.Parse("45").RootElement.Clone() },
-        });
-        scene.Objects.Add(new Node { Name = "Plain" });
-        scene.Save(path);
+        var library = new SceneLibrary(_dir);
+        var world = new World();
+        var spinner = world.Create("Spinner");
+        world.SetPosition(spinner, new Vector3(1, 2, 3));
+        world.Add(spinner, new MeshRenderer("Assets/a.glb"));
+        world.Add(spinner, new ScriptComponent { Class = "Spin", Fields = new() { ["DegreesPerSecond"] = JsonDocument.Parse("45").RootElement.Clone() } });
+        world.Create("Plain");
+        library.Save("Scenes/test.scene.json", SceneLibrary.Write(world));
 
-        Assert.DoesNotContain("\"Script\": null", File.ReadAllText(path));
-        var again = SceneFile.Load(path);
-        Assert.Equal("Spin", again.Objects[0].Script);
-        Assert.Equal(45, again.Objects[0].Fields!["DegreesPerSecond"].GetSingle());
-        Assert.Equal(new Vector3(1, 2, 3), again.Objects[0].Position);
-        Assert.Null(again.Objects[1].Script);
+        Assert.DoesNotContain("null", File.ReadAllText(Path.Combine(_dir, "Scenes", "test.scene.json")));
+        var (doc, problems) = library.Load("Scenes/test.scene.json");
+        Assert.True(problems.Ok, problems.ToString());
+        var again = new World();
+        library.Instantiate(again, doc!);
+        var loaded = again.All();
+        Assert.Equal("Spin", again.Get<ScriptComponent>(loaded[0]).Class);
+        Assert.Equal(45, again.Get<ScriptComponent>(loaded[0]).Fields!["DegreesPerSecond"].GetSingle());
+        Assert.Equal(new Vector3(1, 2, 3), again.Position(loaded[0]));
+        Assert.False(again.Has<ScriptComponent>(loaded[1]));
     }
 }

@@ -72,10 +72,71 @@ public sealed class SceneRenderer : IDisposable
         return mesh;
     }
 
-    /// <summary>Loads every model the nodes use, and their textures, before returning (a load screen's worth of work).</summary>
-    public void LoadAll(IEnumerable<Node> nodes)
+
+    readonly HashSet<EntityId> _noHighlight = [];
+
+    /// <summary>
+    /// Renders the world's mesh renderers into <paramref name="view"/> and tone-maps into <paramref name="output"/>:
+    /// each at its cached world transform, posed by its <see cref="Animator"/> if it has one, skipping hidden
+    /// nodes. <paramref name="highlighted"/> (the editor's selection) get a rim.
+    /// </summary>
+    public void Render(CommandBuffer cmd, RenderView view, World world, in Camera camera, RenderOutput output, double time,
+        IReadOnlySet<EntityId>? highlighted = null, Vector3 gridCentre = default)
     {
-        var paths = nodes.Select(n => n.Model).Distinct().ToList();
+        _draws.Clear();
+        highlighted ??= _noHighlight;
+        Collect(world, _collected);
+        foreach (var d in _collected)
+        {
+            if (Model(d.Mesh) is not { } mesh)
+                continue;
+            var pose = default(Pose);
+            if (d.Clip != null && mesh.Model.Clips.Count > 0)
+            {
+                var clip = mesh.Clip(d.Clip);
+                var duration = mesh.Model.Clips[clip].Duration;
+                var loop = !d.Once;
+                var t = duration <= 0 ? 0 : loop ? d.Time % duration : Math.Min(d.Time, duration);
+                pose = new Pose(clip, t, loop);
+            }
+            _draws.Add(mesh, d.World, pose, highlighted.Contains(d.Entity), d.NoShadows);
+        }
+        Renderer.Render(cmd, view, camera, _draws, output, time, gridCentre);
+    }
+
+    readonly List<SceneDraw> _collected = [];
+
+    /// <summary>One visible mesh renderer, as the renderer will get it.</summary>
+    public readonly record struct SceneDraw(EntityId Entity, string Mesh, Matrix4x4 World, string? Clip, float Time, bool Once, bool NoShadows);
+
+    /// <summary>
+    /// The world's visible mesh renderers with their cached world matrices and animation state. No GPU
+    /// involved, so this is the step tests check; the renderer then resolves meshes by path, so every
+    /// renderer naming the same model shares one GPU mesh.
+    /// </summary>
+    public static void Collect(World world, List<SceneDraw> into)
+    {
+        into.Clear();
+        var renderers = world.Store<MeshRenderer>();
+        var animators = world.Store<Animator>();
+        for (var i = 0; i < renderers.Count; i++)
+        {
+            var e = renderers.Entities[i];
+            ref var mr = ref renderers.Components[i];
+            if (string.IsNullOrEmpty(mr.Mesh) || world.HiddenInHierarchy(e))
+                continue;
+            ref var animator = ref animators.TryGet(e, out var animated);
+            into.Add(new SceneDraw(e, mr.Mesh, world.WorldMatrix(e), animated ? animator.Clip ?? "" : null, animated ? animator.Time : 0, animated && animator.Once, mr.NoShadows));
+        }
+    }
+
+    /// <summary>Loads every model the world's mesh renderers use, and their textures, before returning (a load screen's worth of work).</summary>
+    public void LoadAll(World world)
+    {
+        var paths = new HashSet<string>();
+        foreach (ref var mr in world.Store<MeshRenderer>().Components)
+            if (!string.IsNullOrEmpty(mr.Mesh))
+                paths.Add(mr.Mesh);
         foreach (var p in paths)
             Model(p);
         foreach (var task in _loading.Values.ToList())
@@ -85,29 +146,14 @@ public sealed class SceneRenderer : IDisposable
         Renderer.Materials.WaitForTextures();
     }
 
-    /// <summary>Renders the nodes into <paramref name="view"/> and tone-maps into <paramref name="output"/>. <paramref name="highlighted"/> gets a rim.</summary>
-    public void Render(CommandBuffer cmd, RenderView view, IReadOnlyList<Node> nodes, in Camera camera, RenderOutput output, double time, Node? highlighted = null, Vector3 gridCentre = default)
-    {
-        _draws.Clear();
-        foreach (var o in nodes)
-        {
-            if (Model(o.Model) is not { } mesh)
-                continue;
-            var clip = mesh.Clip(o.Clip);
-            var duration = mesh.Model.Clips.Count == 0 ? 0 : mesh.Model.Clips[clip].Duration;
-            var loop = o.Clip != "death";
-            var t = duration <= 0 ? 0 : loop ? o.Time % duration : Math.Min(o.Time, duration);
-            _draws.Add(mesh, o.Transform, new Pose(clip, t, loop), o == highlighted);
-        }
-        Renderer.Render(cmd, view, camera, _draws, output, time, gridCentre);
-    }
-
     /// <summary>The centre and size of a node's model in the world, for framing it with a camera.</summary>
-    public (Vector3 Centre, float Size) Bounds(Node o)
+    public (Vector3 Centre, float Size) Bounds(World world, EntityId e)
     {
-        if (Model(o.Model) is not { } m || m.Model.Vertices.Length == 0)
-            return (o.Position, 2f * o.Scale);
-        return (Vector3.Transform((m.BoundsMin + m.BoundsMax) / 2, o.Transform), (m.BoundsMax - m.BoundsMin).Length() * o.Scale);
+        var m = world.WorldMatrix(e);
+        var scale = MathF.Max(new Vector3(m.M11, m.M12, m.M13).Length(), MathF.Max(new Vector3(m.M21, m.M22, m.M23).Length(), new Vector3(m.M31, m.M32, m.M33).Length()));
+        if (!world.Has<MeshRenderer>(e) || Model(world.Get<MeshRenderer>(e).Mesh) is not { } mesh || mesh.Model.Vertices.Length == 0)
+            return (m.Translation, 2f * scale);
+        return (Vector3.Transform((mesh.BoundsMin + mesh.BoundsMax) / 2, m), (mesh.BoundsMax - mesh.BoundsMin).Length() * scale);
     }
 
     public void Dispose()

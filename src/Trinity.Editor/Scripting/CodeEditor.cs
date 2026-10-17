@@ -78,7 +78,10 @@ sealed class CodeEditor
 
     public void Save()
     {
-        File.WriteAllText(FilePath, Text);
+        // Through a temporary file, so a crash or a full disk can't leave half a script
+        var temp = FilePath + ".tmp";
+        File.WriteAllText(temp, Text);
+        File.Move(temp, FilePath, overwrite: true);
         _diskTime = File.GetLastWriteTimeUtc(FilePath);
         Dirty = false;
     }

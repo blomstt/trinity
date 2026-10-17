@@ -10,7 +10,7 @@ A game is its own C# project that uses Trinity as a library, made and run from T
 
 | Measured (17 Oct 2026), native build | Trinity Editor | Sandbox sample |
 |---|---|---|
-| On disk, everything that ships | 9.3 MB (6.0 MB executable) | 11 MB with its test models (5.2 MB executable) |
+| On disk, everything that ships | 9.5 MB (6.2 MB executable) | 11 MB with its test models (5.2 MB executable) |
 | Start to ready | 0.1 s (JIT: 0.3 s) | 0.1 s (JIT: 0.28 s) |
 | Memory | 53 MB resident when idle with an empty project, 150 MB peak at start | 145 MB peak (JIT: 174 MB) |
 | Threads / CPU when idle | 7 / 0% (JIT: 12) | — |
@@ -25,11 +25,11 @@ Early. Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md). Decisions: [docs/adr/](docs/
 | `Trinity.Graphics` | Vulkan device and frame loop, GPU buffers, textures, SPIR-V shader loading, pipelines, cameras and frustums, video recording | First version |
 | `Trinity.Animation` | glTF models (its own small `.glb`/`.gltf` reader): meshes with tangents, materials, images, skins; animation baked for GPU skinning | First version |
 | `Trinity.Rendering` | The renderer: HDR forward PBR, bindless materials and textures, procedural sky, cascaded shadows, fog, tone mapping, culling, debug lines | E2 done |
-| `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit. `Trinity.Scenes`: scene files, C# scripts on nodes, `SceneRenderer`, `SceneGame` | E1 done; scenes and scripts first version |
+| `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit. `Trinity.Scenes`: the entity `World`, components, hierarchy, scene files with nested instances, C# scripts on nodes, `SceneRenderer`, `SceneGame` | E1 and E3 done |
 | `Trinity.Generators` | Build-time only: registers a game's scripts and their Inspector fields, so scripts need no reflection (NativeAOT) | First version |
-| `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy, inspector, assets, log, stats, a C# script editor, ▶ Play with hot reload | First version |
+| `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy tree, inspector, assets, log, stats, undo/redo, a C# script editor, ▶ Play with hot reload | First version |
 | `samples/Sandbox` | Scenes made in the editor with small scripts: scripting (`main`), a material test (`materials`), and a 5,000-character stress test with a day cycle (`crowd`) | Runs |
-| `tests/Trinity.Tests` | Unit tests for the core, scenes and scripting | 24 passing |
+| `tests/Trinity.Tests` | Unit tests for the core, entities, hierarchy, scene files, instances, the editor's scene model, scripting and per-frame allocations | 83 passing |
 
 ## Renderer
 
@@ -48,6 +48,15 @@ Each frame: four cascaded shadow maps for the sun, then opaque meshes in HDR (`R
 |---|---|---|---|---|
 | Material test: 87,000 triangles, textures, glass | 0.4 ms | 0.24 ms | 0.12 ms | 0.01 ms |
 | 5,000 animated characters, moving sun | 0.72 ms (3.4 ms before culling) | 0.36 ms | 0.23 ms | 0.11 ms (update) |
+
+## Scenes
+
+A scene is a `World` of entities (nodes) with components, saved as `Scenes/*.scene.json` (ADR 0008).
+
+- **Nodes** have a name, a parent and ordered children, and a local position, rotation (Euler degrees) and scale. World matrices are computed when needed and cached until something above them moves. A node is a small handle (`Node`): `node.Position`, `node.Children`, `node.AddChild("Wheel")`, `node.Get<Animator>()`, `node.Destroy()`. Handles to destroyed nodes are detected (`IsValid`), never silently reused. Destroying during an update waits until the update ends.
+- **Components** are structs, at most one of a type per node: `MeshRenderer` (a model path), `Animator` (clip, speed, paused, play once), `Camera3D` (the `Current` one is what the game renders from), `DirectionalLight` (the sun's direction and strength), and `ScriptComponent` (a C# script and its field values).
+- **Instances (prefabs):** a scene can contain other scenes. Edit a node inside an instance and the change is saved as an override on that instance; the rest follows the source scene, so editing the source updates every instance. Instances nest; a scene containing itself is reported, not expanded. Scripts spawn instances at runtime with `Scene.Spawn("Scenes/enemy.scene.json")`.
+- **Files** are versioned JSON with stable per-scene ids (so references between nodes survive edits), checked when loaded: problems are reported with the node they're in, and what can load does. Older files are migrated.
 
 ## Shaders
 
@@ -87,20 +96,21 @@ A project is a folder with a `trinity.json`:
 | Panel | What it does |
 |---|---|
 | Viewport | The scene, live: right-drag to orbit, middle-drag (or Shift + right-drag) to pan, wheel to zoom, **F** to frame the selection |
-| Hierarchy | Everything placed. Click to select, double-click to frame, right-click to duplicate or delete |
-| Inspector | Name, position, rotation, scale; the attached script and its fields; for rigged models, the animation clip, play/pause, speed and restart |
-| Assets | The project's asset folder. Double-click a `.glb`/`.gltf` to place it in front of the camera |
+| Hierarchy | The node tree. Click to select (Ctrl+click for several), double-click to frame, drag onto a node to put it under it (with Shift: just before it) or onto empty space to move it to the top. Right-click to add a child, rename (F2), duplicate, delete, or open an instance's source scene. Instances show their source in blue; nodes from inside them are dimmed |
+| Inspector | Name, hidden, position, rotation, scale and every component's properties, with pickers for models, clips and nodes. Add or remove components. On a node from an instance, changed properties are highlighted as overrides with a **Reset** to the source's value; an instance lists its overrides with **Revert** and **Reload** |
+| Assets | The project's scenes and assets. Double-click a `.glb`/`.gltf` to place it in front of the camera, a scene to add an instance of it; right-click a scene to open it |
 | Log | Engine, editor and game output, colour-coded |
 | Stats | Frame rate, GPU, objects and triangles, camera |
 | Script | The C# script editor (next to the Viewport): the project's scripts, files in tabs, errors marked in the code and listed underneath |
 
 - **Play** (or F5) saves, then builds and runs the game, its output in the Log; **Stop** (Shift+F5) ends it. With the ASP.NET Core runtime installed (Arch: `aspnet-runtime`, needed by `dotnet watch`), saving a script while the game runs applies the change to the running game (hot reload). Without it, saving restarts the game.
-- **Scenes** are saved as `Scenes/*.scene.json` (Ctrl+S; File > Save scene as, File > Open scene). If you close with unsaved changes, they're kept in `*.autosave.scene.json`.
-- **Shortcuts:** Ctrl+N new scene, Ctrl+D duplicate, Del delete, Ctrl+Q quit.
+- **Scenes** are saved as `Scenes/*.scene.json` (Ctrl+S; File > Save scene as, File > Open scene). Unsaved changes are written to `*.autosave.scene.json` every two minutes, when switching scenes and on quit; the scene file itself only changes when you save.
+- **Undo:** every edit can be undone (Ctrl+Z) and redone (Ctrl+Y or Ctrl+Shift+Z): property changes, gizmo drags (one step per drag), creating, deleting, duplicating, moving in the tree, components, overrides and the environment. Edit shows what the next undo does.
+- **Shortcuts:** Ctrl+N new scene, Ctrl+Shift+N new node, Ctrl+D duplicate, Del delete, F2 rename, Ctrl+Q quit.
 - **Layout:** panels can be dragged and docked anywhere. The layout is remembered in `~/.config/trinity-editor/`.
 - **Models:** any rigged glTF with `…LOD0` meshes and animations plays its clips; anything else loads as a static model. Textures come with the renderer (E2), so models show base colours for now.
 
-Scenes are a list of placed models (nodes) until E3 brings hierarchy and components. The editor grows with each engine item: materials with E2, terrain painting with E5.
+The editor grows with each engine item: terrain painting with E5, physics shapes with E6.
 
 ### Scripts
 
@@ -116,8 +126,8 @@ public sealed class Spin : Script
 }
 ```
 
-- `Ready()` runs once when the scene starts, `Update` every frame, `FixedUpdate` at 60 Hz. A script reaches its `Node` (position, rotation, scale, animation clip), the `Scene` (other nodes, the camera) and `Input`.
-- Inspector fields: public `float`, `double`, `int`, `bool`, `string` and `Vector3` fields. A value set in the Inspector is saved in the scene; **Reset** goes back to the script's default.
+- `Ready()` runs once when the scene starts (children before parents), `Update` every frame, `FixedUpdate` at 60 Hz, `Destroyed()` when its node goes. A script reaches its `Node` (transform, children, components), the `Scene` (`Find("House/Door")`, `Create`, `Spawn`, the camera) and `Input`. Nodes a script adds start their scripts at the next update.
+- Inspector fields: public `float`, `double`, `int`, `bool`, `string`, `Vector3` and `Node` fields (a reference to another node in the scene). A value set in the Inspector is saved in the scene; **Default** goes back to the script's default.
 - **Script editor:** C# colours, line numbers, undo/redo, Ctrl+F find (F3 next), Ctrl+/ comment, Tab/Shift+Tab indent, Alt+Up/Down move lines, auto-indent. Saving (Ctrl+S) checks the code with the compiler; errors are underlined where they are. A script that throws while the game runs is reported with its line, and pauses until its code changes, so the game keeps running.
 - Scripts are found at build time by `Trinity.Generators`, so games stay NativeAOT. A game in its own repository references it like the samples do (see `Directory.Build.targets`).
 - `./trinity-editor PROJECT --open Scripts/Spin.cs:12` opens a script at a line.
