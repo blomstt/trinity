@@ -171,8 +171,19 @@ static class ProjectFiles
         var data = Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } x
             ? x
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
-        var files = Path.Combine(data, "Trash", "files");
-        var info = Path.Combine(data, "Trash", "info");
+        var mounts = File.Exists("/proc/self/mounts") ? File.ReadAllText("/proc/self/mounts") : "";
+        return Trash(fullPath, data, mounts, UserId());
+    }
+
+    /// <summary>
+    /// <see cref="Trash(string)"/> with what it reads from the system passed in (for tests): the user's data
+    /// folder, the mount table and the user id.
+    /// </summary>
+    internal static string Trash(string fullPath, string dataHome, string mounts, string uid)
+    {
+        var (trash, pathInInfo) = TrashFor(Path.GetFullPath(fullPath), dataHome, mounts, uid);
+        var files = Path.Combine(trash, "files");
+        var info = Path.Combine(trash, "info");
         Directory.CreateDirectory(files);
         Directory.CreateDirectory(info);
         var name = Path.GetFileName(fullPath.TrimEnd('/'));
@@ -181,7 +192,7 @@ static class ProjectFiles
             unique = $"{Path.GetFileNameWithoutExtension(name)}.{i}{Path.GetExtension(name)}";
         // The info file first, as the spec asks, so a crash between the two leaves nothing unaccounted for
         File.WriteAllText(Path.Combine(info, unique + ".trashinfo"),
-            $"[Trash Info]\nPath={Uri.EscapeDataString(fullPath).Replace("%2F", "/")}\nDeletionDate={DateTime.Now:yyyy-MM-ddTHH:mm:ss}\n");
+            $"[Trash Info]\nPath={Uri.EscapeDataString(pathInInfo).Replace("%2F", "/")}\nDeletionDate={DateTime.Now:yyyy-MM-ddTHH:mm:ss}\n");
         var target = Path.Combine(files, unique);
         try
         {
@@ -190,12 +201,57 @@ static class ProjectFiles
             else
                 File.Move(fullPath, target);
         }
-        catch
+        catch (Exception e)
         {
             File.Delete(Path.Combine(info, unique + ".trashinfo"));
-            throw;
+            throw new IOException($"couldn't move it into {trash}: {e.Message}", e);
         }
         return target;
+    }
+
+    /// <summary>
+    /// Which trash a file goes to, as the freedesktop.org spec says: the user's own (in their data folder)
+    /// for files on the same drive, otherwise that drive's own, $topdir/.Trash-$uid, since a move can't
+    /// cross drives. Returns the trash folder and the path its .trashinfo records (relative to the drive's
+    /// top for a drive's own trash).
+    /// </summary>
+    internal static (string Trash, string PathInInfo) TrashFor(string fullPath, string dataHome, string mounts, string uid)
+    {
+        var drive = MountPointOf(fullPath, mounts);
+        if (drive == MountPointOf(Path.GetFullPath(dataHome), mounts))
+            return (Path.Combine(dataHome, "Trash"), fullPath);
+        return (Path.Combine(drive, ".Trash-" + uid), Path.GetRelativePath(drive, fullPath));
+    }
+
+    /// <summary>The mount point a path is on: the longest one in the mount table (/proc/self/mounts) that contains it.</summary>
+    internal static string MountPointOf(string path, string mounts)
+    {
+        var best = "/";
+        foreach (var line in mounts.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var fields = line.Split(' ');
+            if (fields.Length < 2)
+                continue;
+            // Spaces and other awkward characters are written as octal escapes (\040)
+            var point = System.Text.RegularExpressions.Regex.Replace(fields[1], @"\\([0-7]{3})", m => ((char)Convert.ToInt32(m.Groups[1].Value, 8)).ToString());
+            var inside = point == "/" || path == point || path.StartsWith(point.TrimEnd('/') + "/", StringComparison.Ordinal);
+            if (inside && point.Length > best.Length)
+                best = point;
+        }
+        return best;
+    }
+
+    /// <summary>The user's id, for a drive's own trash folder (from /proc, so no native call is needed).</summary>
+    static string UserId()
+    {
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/self/status"))
+                if (line.StartsWith("Uid:", StringComparison.Ordinal))
+                    return line.Split('\t', ' ', StringSplitOptions.RemoveEmptyEntries)[1];
+        }
+        catch (IOException) { }
+        return Environment.UserName;
     }
 
     /// <summary>

@@ -1515,8 +1515,14 @@ sealed partial class EditorApp
                 foreach (var s in d.UsedBy.Take(8))
                     ImGui.BulletText(s);
             }
-            ImGui.TextDisabled("They can be restored from the trash in your file manager.   y: yes   n: no");
-            if (ImGui.Button("Move to trash", new float2(140, 0)) || ImGui.IsKeyPressed(ImGuiKey.Y) || ImGui.IsKeyPressed(ImGuiKey.Enter))
+            // The open scene (or a folder holding it) stays open: it's marked unsaved, and saving writes it back
+            var holdsOpenScene = d.Paths.Any(p => ProjectFiles.Moved(_scene.Path, p, p) != null);
+            if (holdsOpenScene)
+                ImGui.TextColored(Warning, d.Paths.Contains(_scene.Path)
+                    ? "This includes the open scene. It stays open, marked unsaved; saving writes it back."
+                    : $"This holds the open scene ({_scene.Path}). It stays open, marked unsaved; saving writes it back.");
+            ImGui.TextDisabled("They can be restored from the trash in your file manager.");
+            if (ImGui.Button("Move to trash", new float2(140, 0)) || ImGui.IsKeyPressed(ImGuiKey.Enter))
             {
                 foreach (var path in d.Paths)
                 {
@@ -1532,13 +1538,18 @@ sealed partial class EditorApp
                         Log.Error("editor", $"couldn't move {path} to the trash: {e.Message}");
                     }
                 }
+                if (holdsOpenScene && !File.Exists(_project.Absolute(_scene.Path)))
+                {
+                    _scene.Dirty = true;
+                    Log.Warn("editor", $"{_scene.Path} is open but its file is in the trash: save to keep it, or open another scene to let it go");
+                }
                 SaveFavorites();
                 FsRefresh();
                 _fsDelete = null;
                 ImGui.CloseCurrentPopup();
             }
             ImGui.SameLine();
-            if (ImGui.Button("Cancel", new float2(100, 0)) || ImGui.IsKeyPressed(ImGuiKey.Escape) || ImGui.IsKeyPressed(ImGuiKey.N))
+            if (ImGui.Button("Cancel", new float2(100, 0)) || ImGui.IsKeyPressed(ImGuiKey.Escape))
             {
                 _fsDelete = null;
                 ImGui.CloseCurrentPopup();
