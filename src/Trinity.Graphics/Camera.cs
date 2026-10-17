@@ -3,8 +3,8 @@ using System.Numerics;
 namespace Trinity.Graphics;
 
 /// <summary>
-/// A perspective camera in Trinity's conventions: right-handed, Y up, depth 0..1, and Vulkan's
-/// downward clip-space Y. Matrices are .NET row-vector style (point * View * Projection), which a
+/// A perspective camera in Trinity's conventions: right-handed, Y up, reversed depth (1 near, 0 far),
+/// and Vulkan's downward clip-space Y. Matrices are .NET row-vector style (point * View * Projection), which a
 /// GLSL <c>mat4</c> reads correctly as <c>viewProj * vec4(p, 1)</c>.
 /// </summary>
 public struct Camera
@@ -23,11 +23,16 @@ public struct Camera
 
     public readonly Matrix4x4 View => Matrix4x4.CreateLookAt(Position, Target, Vector3.UnitY);
 
+    /// <summary>Perspective with reversed depth: 1 at <see cref="Near"/>, 0 at <see cref="Far"/>.</summary>
     public readonly Matrix4x4 Projection(float aspect)
     {
-        var p = Matrix4x4.CreatePerspectiveFieldOfView(FieldOfView, aspect, Near, Far);
-        p.M22 = -p.M22; // Vulkan's clip space has Y pointing down
-        return p;
+        var y = 1f / MathF.Tan(FieldOfView / 2);
+        return new Matrix4x4(
+            y / aspect, 0, 0, 0,
+            0, -y, 0, 0, // Vulkan's clip space has Y pointing down
+            0, 0, Near / (Far - Near), -1,
+            0, 0, Near * Far / (Far - Near), 0
+        );
     }
 
     public readonly Matrix4x4 ViewProjection(float aspect) => View * Projection(aspect);
@@ -60,7 +65,7 @@ public readonly struct Frustum
 {
     readonly Vector4 _left, _right, _bottom, _top, _near, _far;
 
-    /// <summary>From a view-projection matrix in Trinity's conventions (row-vector, depth 0..1).</summary>
+    /// <summary>From a view-projection matrix in Trinity's conventions (row-vector, reversed depth 1..0; the same six planes either way).</summary>
     public Frustum(Matrix4x4 m)
     {
         var c1 = new Vector4(m.M11, m.M21, m.M31, m.M41);

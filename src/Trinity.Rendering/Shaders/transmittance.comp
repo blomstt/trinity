@@ -1,0 +1,28 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// How much sunlight survives from each altitude and direction to the top of the atmosphere.
+
+#include "atmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outTransmittance;
+
+void main() {
+    ivec2 size = imageSize(outTransmittance);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    float cosZenith = uv.x * 2.0 - 1.0;
+    float altitude = uv.y * (TOP - BOTTOM);
+    vec3 o = vec3(0.0, BOTTOM + altitude, 0.0);
+    vec3 d = vec3(sqrt(max(0.0, 1.0 - cosZenith * cosZenith)), cosZenith, 0.0);
+    float t = raySphere(o, d, TOP);
+    const int STEPS = 40;
+    vec3 depth = vec3(0.0);
+    for (int i = 0; i < STEPS; i++) {
+        vec3 s = o + d * (t * (float(i) + 0.5) / float(STEPS));
+        depth += medium(length(s) - BOTTOM).extinction;
+    }
+    imageStore(outTransmittance, p, vec4(exp(-depth * t / float(STEPS)), 1.0));
+}

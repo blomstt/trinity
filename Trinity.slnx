@@ -8,6 +8,7 @@
     <Project Path="src/Trinity.Editor/Trinity.Editor.csproj" />
     <Project Path="src/Trinity.Generators/Trinity.Generators.csproj" />
     <Project Path="src/Trinity.Graphics/Trinity.Graphics.csproj" />
+    <Project Path="src/Trinity.Rendering/Trinity.Rendering.csproj" />
     <Project Path="src/Trinity/Trinity.csproj" />
   </Folder>
   <Folder Name="/tests/">

@@ -57,10 +57,55 @@ public sealed class Node
         };
 }
 
-/// <summary>A scene as saved: <c>*.scene.json</c>, a list of nodes.</summary>
+/// <summary>Where a scene's camera starts: orbiting <see cref="Target"/>, angles in degrees.</summary>
+public sealed class SceneCamera
+{
+    public Vector3 Target { get; set; } = new(0, 1, 0);
+    public float Yaw { get; set; } = 45;
+    public float Pitch { get; set; } = 20;
+    public float Distance { get; set; } = 8;
+}
+
+/// <summary>A scene's light and look: the sun, the sky, shadows, fog and exposure. Angles in degrees.</summary>
+public sealed class SceneEnvironment
+{
+    /// <summary>Clockwise from north (-Z).</summary>
+    public float SunAzimuth { get; set; } = 220;
+    /// <summary>Above the horizon; negative is night.</summary>
+    public float SunElevation { get; set; } = 50;
+    public float SunIlluminance { get; set; } = 6;
+    public float Haze { get; set; } = 1;
+    public bool Shadows { get; set; } = true;
+    public float ShadowDistance { get; set; } = 80;
+    /// <summary>Exponential fog: how quickly it thickens with distance (per metre); 0 for none.</summary>
+    public float FogDensity { get; set; } = 0.002f;
+    /// <summary>How fast fog thins with height (per metre); 0 for even fog at every height.</summary>
+    public float FogHeightFalloff { get; set; } = 0.05f;
+    /// <summary>Exposure compensation in photographic stops: +1 is twice as bright.</summary>
+    public float Exposure { get; set; }
+    /// <summary>"AgX" or "ACES".</summary>
+    public string ToneMapper { get; set; } = "AgX";
+
+    public void ApplyTo(Rendering.RenderSettings s)
+    {
+        s.SunDirection = Rendering.RenderSettings.SunAt(SunAzimuth, SunElevation);
+        s.SunIlluminance = SunIlluminance;
+        s.Haze = Haze;
+        s.Shadows = Shadows;
+        s.ShadowDistance = ShadowDistance;
+        s.FogDensity = FogDensity;
+        s.FogHeightFalloff = FogHeightFalloff;
+        s.ExposureStops = Exposure;
+        s.ToneMapper = ToneMapper.Equals("ACES", StringComparison.OrdinalIgnoreCase) ? Rendering.ToneMapper.Aces : Rendering.ToneMapper.AgX;
+    }
+}
+
+/// <summary>A scene as saved: <c>*.scene.json</c>, its nodes, its environment and where the camera starts.</summary>
 public sealed class SceneFile
 {
     public List<Node> Objects { get; set; } = [];
+    public SceneEnvironment Environment { get; set; } = new();
+    public SceneCamera? Camera { get; set; }
 
     public static SceneFile Load(string path) =>
         JsonSerializer.Deserialize(File.ReadAllText(path), SceneJson.Default.SceneFile) ?? new SceneFile();

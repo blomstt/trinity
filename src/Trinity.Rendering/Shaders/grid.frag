@@ -1,11 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
-layout(push_constant) uniform Frame {
-    mat4 viewProj;
-    vec4 cameraPos;
-    vec4 sunDir;
-    vec4 params;
-} frame;
+#include "frame.glsl"
 
 layout(location = 0) in vec3 inWorld;
 layout(location = 0) out vec4 outColor;
@@ -28,6 +24,6 @@ void main() {
     if (axis.y < 1.0) { color = vec3(0.75, 0.22, 0.20); alpha = 0.9; }
     if (axis.x < 1.0) { color = vec3(0.22, 0.38, 0.80); alpha = 0.9; }
 
-    float fade = 1.0 - smoothstep(frame.params.y * 0.5, frame.params.y, length(p - frame.cameraPos.xz));
+    float fade = 1.0 - smoothstep(frame.grid.x * 0.5, frame.grid.x, length(p - frame.cameraPos.xz));
     outColor = vec4(pow(color, vec3(2.2)), alpha * fade);
 }

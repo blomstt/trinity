@@ -37,7 +37,20 @@ public abstract class Game : IDisposable
     /// <summary>The game's player settings file, also used by the engine for display and controls.</summary>
     protected Settings Settings => Engine.Settings;
 
+    /// <summary>Draws into the frame's colour + depth pass, which <see cref="RenderFrame"/> has begun.</summary>
     public virtual void Render(CommandBuffer cmd, in FrameTime time) { }
+
+    /// <summary>
+    /// Records the whole frame. By default: begins rendering into the window, cleared to
+    /// <see cref="ClearColor"/>, and calls <see cref="Render"/>. Override to run your own passes (as
+    /// <see cref="Scenes.SceneGame"/> does with Trinity's renderer); the frame's image is in
+    /// colour-attachment layout, and anything still rendering at the end is ended for you.
+    /// </summary>
+    public virtual void RenderFrame(CommandBuffer cmd, in FrameTime time)
+    {
+        Gpu.BeginRendering(cmd, new VkClearColorValue { Float32 = ClearColor });
+        Render(cmd, time);
+    }
 
     /// <summary>Text for the window title and stats output, refreshed twice a second.</summary>
     public virtual string Status => "";

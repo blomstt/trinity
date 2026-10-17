@@ -24,11 +24,22 @@ public sealed class Scene
     readonly HashSet<Script> _failed = [];
     int _reloads;
 
-    public Scene(Engine engine, List<Node> nodes, string root)
+    /// <summary>Sun, sky, fog and exposure; applied to the renderer each frame, so scripts can change them (a day cycle, say).</summary>
+    public SceneEnvironment Environment = new();
+
+    public Scene(Engine engine, List<Node> nodes, string root, SceneCamera? camera = null)
     {
         Engine = engine;
         Nodes = nodes;
         Root = root;
+        if (camera != null)
+            Camera = new OrbitCamera
+            {
+                Target = camera.Target,
+                Yaw = float.DegreesToRadians(camera.Yaw),
+                Pitch = float.DegreesToRadians(camera.Pitch),
+                Distance = camera.Distance,
+            };
     }
 
     /// <summary>Loads a <c>*.scene.json</c>. Relative paths resolve from the executable's folder.</summary>
@@ -38,16 +49,24 @@ public sealed class Scene
         var file = SceneFile.Load(full);
         // Scenes live in <root>/Scenes/; models are named relative to <root>
         var root = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(full)))!;
-        return new Scene(engine, file.Objects, root);
+        return new Scene(engine, file.Objects, root, file.Camera) { Environment = file.Environment };
     }
 
     public Node? Find(string name) => Nodes.FirstOrDefault(n => n.Name == name);
 
-    /// <summary>Creates every node's script, then calls each one's <see cref="Script.Ready"/>.</summary>
+    int _started;
+
+    /// <summary>
+    /// Creates every node's script, then calls each one's <see cref="Script.Ready"/>. Nodes added later
+    /// (scripts may add them) start the same way at the next update.
+    /// </summary>
     public void Start()
     {
-        foreach (var node in Nodes)
+        // Scripts' Ready may add nodes: handle the ones there now, and later ones next time
+        var end = Nodes.Count;
+        for (var i = _started; i < end; i++)
         {
+            var node = Nodes[i];
             if (string.IsNullOrEmpty(node.Script))
                 continue;
             var script = Scripts.Create(node.Script, node.Fields);
@@ -60,24 +79,34 @@ public sealed class Scene
             script.Scene = this;
             node.Behaviour = script;
         }
-        foreach (var node in Nodes)
-            if (node.Behaviour is { } s)
+        var first = _started;
+        _started = end;
+        for (var i = first; i < end; i++)
+            if (Nodes[i].Behaviour is { } s)
                 Run(s, "Ready", static (s, _) => s.Ready(), default);
     }
 
     public void FixedUpdate(in FrameTime time)
     {
         ResumeAfterReload();
-        foreach (var node in Nodes)
-            if (node.Behaviour is { } s)
+        if (_started < Nodes.Count)
+            Start();
+        // By index: scripts may add nodes as they run (those join next update)
+        var count = Nodes.Count;
+        for (var i = 0; i < count; i++)
+            if (Nodes[i].Behaviour is { } s)
                 Run(s, "FixedUpdate", static (s, t) => s.FixedUpdate(t), time);
     }
 
     public void Update(in FrameTime time)
     {
         ResumeAfterReload();
-        foreach (var node in Nodes)
+        if (_started < Nodes.Count)
+            Start();
+        var count = Nodes.Count;
+        for (var i = 0; i < count; i++)
         {
+            var node = Nodes[i];
             if (node.Playing)
                 node.Time += time.Delta * node.Speed;
             if (node.Behaviour is { } s)

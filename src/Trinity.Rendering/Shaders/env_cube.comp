@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// The environment cubemap's top mip: the sky's radiance in each texel's direction.
+
+#include "atmosphere.glsl"
+#include "cube.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray outCube;
+layout(set = 0, binding = 2) uniform sampler2D sky;
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    int size = imageSize(outCube).x;
+    if (p.x >= size || p.y >= size) return;
+    vec3 d = cubeDirection(p.z, (vec2(p.xy) + 0.5) / float(size));
+    imageStore(outCube, p, vec4(textureLod(sky, skyViewUv(d), 0.0).rgb, 1.0));
+}

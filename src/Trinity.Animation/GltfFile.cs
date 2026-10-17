@@ -13,11 +13,13 @@ sealed class GltfFile
 {
     public readonly GltfDocument Doc;
     readonly byte[][] _buffers;
+    readonly string _folder;
 
-    GltfFile(GltfDocument doc, byte[][] buffers)
+    GltfFile(GltfDocument doc, byte[][] buffers, string folder)
     {
         Doc = doc;
         _buffers = buffers;
+        _folder = folder;
     }
 
     public static GltfFile Load(string path)
@@ -51,7 +53,19 @@ sealed class GltfFile
             var uri when uri.StartsWith("data:", StringComparison.Ordinal) => Convert.FromBase64String(uri[(uri.IndexOf(',') + 1)..]),
             var uri => File.ReadAllBytes(Path.Combine(folder, Uri.UnescapeDataString(uri))),
         }).ToArray();
-        return new GltfFile(doc, buffers);
+        return new GltfFile(doc, buffers, folder);
+    }
+
+    /// <summary>An image's encoded bytes (PNG, JPEG): from the binary chunk, a data: URI or a file next to the glTF.</summary>
+    public byte[] ImageBytes(int index)
+    {
+        var image = Doc.Images[index];
+        if (image.BufferView is { } view)
+            return BufferView(view).ToArray();
+        var uri = image.Uri ?? throw new InvalidDataException($"image {index} has no data");
+        return uri.StartsWith("data:", StringComparison.Ordinal)
+            ? Convert.FromBase64String(uri[(uri.IndexOf(',') + 1)..])
+            : File.ReadAllBytes(Path.Combine(_folder, Uri.UnescapeDataString(uri)));
     }
 
     public ReadOnlySpan<byte> BufferView(int index)
@@ -73,6 +87,9 @@ sealed class GltfDocument
     public GltfSkin[] Skins { get; set; } = [];
     public GltfAnimation[] Animations { get; set; } = [];
     public GltfMaterial[] Materials { get; set; } = [];
+    public GltfTexture[] Textures { get; set; } = [];
+    public GltfImage[] Images { get; set; } = [];
+    public GltfSampler2D[] Samplers { get; set; } = [];
 }
 
 sealed class GltfAccessor
@@ -158,11 +175,63 @@ sealed class GltfMaterial
 {
     public string? Name { get; set; }
     public GltfPbr? PbrMetallicRoughness { get; set; }
+    public GltfTextureRef? NormalTexture { get; set; }
+    public GltfTextureRef? OcclusionTexture { get; set; }
+    public GltfTextureRef? EmissiveTexture { get; set; }
+    public float[] EmissiveFactor { get; set; } = [0, 0, 0];
+    public string AlphaMode { get; set; } = "OPAQUE"; // or MASK, BLEND
+    public float AlphaCutoff { get; set; } = 0.5f;
+    public bool DoubleSided { get; set; }
+    public GltfMaterialExtensions? Extensions { get; set; }
+}
+
+sealed class GltfMaterialExtensions
+{
+    [JsonPropertyName("KHR_materials_emissive_strength")]
+    public GltfEmissiveStrength? EmissiveStrength { get; set; }
+}
+
+sealed class GltfEmissiveStrength
+{
+    public float EmissiveStrength { get; set; } = 1;
 }
 
 sealed class GltfPbr
 {
     public float[] BaseColorFactor { get; set; } = [1, 1, 1, 1];
+    public GltfTextureRef? BaseColorTexture { get; set; }
+    public float MetallicFactor { get; set; } = 1;
+    public float RoughnessFactor { get; set; } = 1;
+    public GltfTextureRef? MetallicRoughnessTexture { get; set; }
+}
+
+sealed class GltfTextureRef
+{
+    public int Index { get; set; }
+    public int TexCoord { get; set; }
+    public float Scale { get; set; } = 1; // normal maps: strength
+    public float Strength { get; set; } = 1; // occlusion: strength
+}
+
+sealed class GltfTexture
+{
+    public int? Sampler { get; set; }
+    public int? Source { get; set; }
+}
+
+sealed class GltfImage
+{
+    public string? Uri { get; set; }
+    public int? BufferView { get; set; }
+    public string? MimeType { get; set; }
+}
+
+sealed class GltfSampler2D
+{
+    public int? MagFilter { get; set; } // 9728 nearest, 9729 linear
+    public int? MinFilter { get; set; }
+    public int WrapS { get; set; } = 10497; // 33071 clamp, 33648 mirrored repeat, 10497 repeat
+    public int WrapT { get; set; } = 10497;
 }
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

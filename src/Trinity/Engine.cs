@@ -162,8 +162,7 @@ public sealed class Engine : IDisposable
 
             var time = new FrameTime((float)delta, gameTime, frame++, real, (float)(accumulator / fixedStep));
             game.Update(time);
-            Gpu.BeginRendering(cmd, new VkClearColorValue { Float32 = game.ClearColor });
-            game.Render(cmd, time);
+            game.RenderFrame(cmd, time);
             Gpu.EndFrame(cmd, recorder?.Buffer);
             recorder?.Capture();
 

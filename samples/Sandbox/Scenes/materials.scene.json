@@ -1,0 +1,8 @@
+{
+  "Objects": [
+    { "Name": "Material test", "Model": "Assets/material_test.glb", "Position": [0, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "", "Speed": 1, "Playing": false },
+    { "Name": "Mossy rocks", "Model": "Assets/props/rock_moss_set_01/rock_moss_set_01.gltf", "Position": [-2.5, 0, 2], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "", "Speed": 1, "Playing": false },
+    { "Name": "Character", "Model": "Assets/character.glb", "Position": [3, 0, 2], "Rotation": [0, -30, 0], "Scale": 1, "Clip": "idle", "Speed": 1, "Playing": true }
+  ],
+  "Camera": { "Target": [0, 0.6, -0.5], "Yaw": 20, "Pitch": 28, "Distance": 11 }
+}

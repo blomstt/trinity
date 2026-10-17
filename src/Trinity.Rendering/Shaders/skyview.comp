@@ -1,0 +1,64 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// The sky's radiance in every direction from the viewer, for a sun of illuminance 1 (scaled later),
+// including the lit ground below the horizon. Single scattering plus a cheap isotropic multiple-
+// scattering term, marched through the atmosphere with sunlight attenuated by the transmittance table.
+
+#include "atmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outSky;
+layout(set = 0, binding = 2) uniform sampler2D transmittance;
+
+vec3 sunTransmittance(vec3 p, vec3 toSun) {
+    float r = length(p);
+    vec3 up = p / r;
+    // In the planet's shadow (starting a metre off the surface, so a ground point doesn't hit itself)
+    if (raySphere(p + up * 1e-3, toSun, BOTTOM) > 0.0) return vec3(0.0);
+    return texture(transmittance, transmittanceUv(r - BOTTOM, dot(up, toSun))).rgb;
+}
+
+void main() {
+    ivec2 size = imageSize(outSky);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+    vec3 d = skyViewDir((vec2(p) + 0.5) / vec2(size));
+    vec3 toSun = atmosphere.sunDir.xyz;
+    vec3 o = vec3(0.0, BOTTOM + atmosphere.params.z, 0.0);
+
+    float tTop = raySphere(o, d, TOP);
+    float tGround = raySphere(o, d, BOTTOM);
+    bool hitsGround = tGround > 0.0;
+    float tMax = hitsGround ? tGround : tTop;
+
+    float c = dot(d, toSun);
+    float phaseR = rayleighPhase(c);
+    float phaseM = miePhase(c, atmosphere.params.y);
+    const int STEPS = 32;
+    vec3 radiance = vec3(0.0), throughput = vec3(1.0);
+    float prevT = 0.0;
+    for (int i = 0; i < STEPS; i++) {
+        // Denser steps near the viewer, where the air is thick
+        float t = tMax * pow((float(i) + 0.5) / float(STEPS), 2.0);
+        float dt = t - prevT;
+        prevT = t;
+        vec3 s = o + d * t;
+        Medium m = medium(length(s) - BOTTOM);
+        vec3 sun = sunTransmittance(s, toSun);
+        vec3 scattering = m.scatteringR * phaseR + m.scatteringM * phaseM;
+        // Light scattered more than once, approximated as a fraction of the single-scattered light, isotropic
+        vec3 multiple = (m.scatteringR + m.scatteringM) * atmosphere.params.w / (4.0 * PI_ATMO);
+        vec3 inscatter = (scattering * sun + multiple * sun * max(dot(normalize(s), toSun) + 0.2, 0.0));
+        vec3 stepT = exp(-m.extinction * dt);
+        // Exact integral of in-scattering over the step, given constant medium
+        radiance += throughput * inscatter * (1.0 - stepT) / max(m.extinction, vec3(1e-6));
+        throughput *= stepT;
+    }
+    if (hitsGround) {
+        vec3 g = o + d * tGround;
+        vec3 n = normalize(g);
+        radiance += throughput * atmosphere.ground.rgb / PI_ATMO * sunTransmittance(g, toSun) * max(dot(n, toSun), 0.0);
+    }
+    imageStore(outSky, p, vec4(radiance * atmosphere.sunDir.w, 1.0));
+}

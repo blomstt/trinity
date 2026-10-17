@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Projects the sky (radiance per direction, from the sky-view table) onto 9 spherical harmonics, the
+// diffuse light every surface receives from the sky. One workgroup sums the whole table.
+
+#include "atmosphere.glsl"
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 2) uniform sampler2D sky;
+layout(std430, set = 0, binding = 3) writeonly buffer SH { vec4 coefficients[9]; } sh;
+
+shared vec3 partial[256][9];
+
+void basis(vec3 d, out float y[9]) {
+    y[0] = 0.282095;
+    y[1] = 0.488603 * d.y;
+    y[2] = 0.488603 * d.z;
+    y[3] = 0.488603 * d.x;
+    y[4] = 1.092548 * d.x * d.y;
+    y[5] = 1.092548 * d.y * d.z;
+    y[6] = 0.315392 * (3.0 * d.z * d.z - 1.0);
+    y[7] = 1.092548 * d.x * d.z;
+    y[8] = 0.546274 * (d.x * d.x - d.y * d.y);
+}
+
+void main() {
+    uint id = gl_LocalInvocationID.x;
+    vec3 sum[9];
+    for (int k = 0; k < 9; k++) sum[k] = vec3(0.0);
+    // A uniform grid of directions over the sphere (Fibonacci), 16 per thread
+    const uint SAMPLES = 4096u;
+    for (uint i = id; i < SAMPLES; i += 256u) {
+        float z = 1.0 - (float(i) + 0.5) * 2.0 / float(SAMPLES);
+        float r = sqrt(max(0.0, 1.0 - z * z));
+        float phi = float(i) * 2.39996323;
+        vec3 d = vec3(r * cos(phi), z, r * sin(phi)); // y is up
+        vec3 radiance = textureLod(sky, skyViewUv(d), 0.0).rgb;
+        float y[9];
+        basis(d, y);
+        for (int k = 0; k < 9; k++) sum[k] += radiance * y[k];
+    }
+    for (int k = 0; k < 9; k++) partial[id][k] = sum[k];
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (id < stride)
+            for (int k = 0; k < 9; k++) partial[id][k] += partial[id + stride][k];
+        barrier();
+    }
+    if (id == 0u) {
+        // Monte Carlo weight (4π / N), and the cosine lobe's convolution so evaluating gives irradiance
+        const float A[9] = float[](3.141593, 2.094395, 2.094395, 2.094395, 0.785398, 0.785398, 0.785398, 0.785398, 0.785398);
+        for (int k = 0; k < 9; k++)
+            sh.coefficients[k] = vec4(partial[0][k] * (4.0 * PI_ATMO / float(SAMPLES)) * A[k], 0.0);
+    }
+}

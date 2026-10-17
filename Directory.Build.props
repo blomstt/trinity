@@ -23,5 +23,7 @@
   <PropertyGroup Condition="'$(Configuration)' != 'Release'">
     <StartupHookSupport>true</StartupHookSupport>
     <MetadataUpdaterSupport>true</MetadataUpdaterSupport>
+    <!-- Debug.Line and friends; calls compile away in Release (shipping) builds -->
+    <DefineConstants>$(DefineConstants);TRINITY_DEBUG_DRAW</DefineConstants>
   </PropertyGroup>
 </Project>

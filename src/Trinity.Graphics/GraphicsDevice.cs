@@ -5,10 +5,17 @@ using Brutal.VulkanApi.Abstractions;
 
 namespace Trinity.Graphics;
 
+/// <summary>What this GPU supports beyond Vulkan 1.3's baseline, for systems that adapt to it.</summary>
+/// <param name="Bindless">Large, partially bound texture arrays indexed per pixel (descriptor indexing).</param>
+/// <param name="MaxTextures">Textures one array can hold: thousands when bindless, a small fixed number when not.</param>
+/// <param name="TimestampPeriod">Nanoseconds per GPU timestamp tick; 0 if timestamps aren't supported.</param>
+public sealed record GpuFeatures(bool Bindless, int MaxTextures, float MaxAnisotropy, bool DepthClamp, float TimestampPeriod);
+
 /// <summary>
 /// Everything needed to put pictures on the screen: instance, device, swapchain, a shared depth
 /// buffer, and the per-frame command buffers and sync objects. Uses Vulkan 1.3 dynamic rendering,
-/// so there are no render passes or framebuffers.
+/// so there are no render passes or framebuffers. Depth is reversed: 1 at the near plane, 0 at the far
+/// one, cleared to 0 and tested with greater-or-equal, which keeps precision over long distances.
 /// </summary>
 public sealed unsafe class GraphicsDevice : IDisposable
 {
@@ -21,17 +28,30 @@ public sealed unsafe class GraphicsDevice : IDisposable
     public readonly Queue Queue;
     public readonly int QueueFamily;
     public readonly string GpuName;
+    public readonly GpuFeatures Features;
+
+    /// <summary>Compiled pipelines, kept on disk between runs so start-up doesn't recompile them.</summary>
+    public readonly VkPipelineCache PipelineCache;
+    readonly string _pipelineCachePath;
 
     public VkFormat ColorFormat { get; private set; }
     public VkExtent2D Extent { get; private set; }
     public bool VSync { get; set; }
     public int FrameIndex { get; private set; }
 
+    /// <summary>Counts frames begun, for doing once-per-frame work only once.</summary>
+    public long FrameNumber { get; private set; }
+
     /// <summary>The swapchain images' views (one in off-screen mode), for tools that render their own passes.</summary>
     public IReadOnlyList<VkImageView> ImageViews => _views;
 
     /// <summary>Which of <see cref="ImageViews"/> this frame draws into (valid after <see cref="BeginFrame"/>).</summary>
     public int ImageIndex => _imageIndex;
+
+    /// <summary>This frame's image, in ColorAttachmentOptimal after <see cref="BeginFrame"/>.</summary>
+    public VkImage CurrentImage => _images[_imageIndex];
+
+    public VkImageView CurrentView => _views[_imageIndex];
 
     public int MinImageCount { get; private set; } = 2;
 
@@ -53,6 +73,8 @@ public sealed unsafe class GraphicsDevice : IDisposable
     VkDeviceMemory _depthMemory;
     VkImageView _depthView;
     int _imageIndex;
+    bool _rendering;
+    readonly List<Action>[] _releases = [[], []];
     bool _swapchainDirty;
     bool _presentModeVSync;
 
@@ -93,6 +115,23 @@ public sealed unsafe class GraphicsDevice : IDisposable
         var props = PhysicalDevice.GetProperties();
         GpuName = new string((sbyte*)props.DeviceName);
 
+        // Optional features: bindless texture arrays, anisotropic filtering, depth clamp (for shadows)
+        var supported13 = new VkPhysicalDeviceVulkan13Features();
+        var supported12 = new VkPhysicalDeviceVulkan12Features { Next = &supported13 };
+        var supported = new VkPhysicalDeviceFeatures2 { Next = &supported12 };
+        PhysicalDevice.GetFeatures2(ref supported);
+        var bindless = supported12.DescriptorIndexing && supported12.RuntimeDescriptorArray && supported12.DescriptorBindingPartiallyBound
+            && supported12.ShaderSampledImageArrayNonUniformIndexing && supported12.DescriptorBindingVariableDescriptorCount
+            && Environment.GetEnvironmentVariable("TRINITY_NO_BINDLESS") != "1";
+        var limits = props.Limits;
+        Features = new GpuFeatures(
+            bindless,
+            bindless ? Math.Min(16384, limits.MaxPerStageDescriptorSampledImages) : Math.Min(64, limits.MaxPerStageDescriptorSamplers),
+            supported.Features.SamplerAnisotropy ? limits.MaxSamplerAnisotropy : 1,
+            supported.Features.DepthClamp,
+            limits.TimestampComputeAndGraphics ? limits.TimestampPeriod : 0
+        );
+
         var priority = 1f;
         var queueInfo = new VkDeviceQueueCreateInfo
         {
@@ -100,15 +139,38 @@ public sealed unsafe class GraphicsDevice : IDisposable
             QueueCount = 1,
             QueuePriorities = &priority,
         };
-        var vulkan13 = new VkPhysicalDeviceVulkan13Features { DynamicRendering = true, Synchronization2 = true };
+        var vulkan13 = new VkPhysicalDeviceVulkan13Features
+        {
+            DynamicRendering = true,
+            Synchronization2 = true,
+            // Shaders compiled for Vulkan 1.3 turn `discard` into demote-to-helper
+            ShaderDemoteToHelperInvocation = supported13.ShaderDemoteToHelperInvocation,
+        };
+        var vulkan12 = new VkPhysicalDeviceVulkan12Features
+        {
+            Next = &vulkan13,
+            DescriptorIndexing = bindless,
+            RuntimeDescriptorArray = bindless,
+            DescriptorBindingPartiallyBound = bindless,
+            ShaderSampledImageArrayNonUniformIndexing = bindless,
+            DescriptorBindingVariableDescriptorCount = bindless,
+            HostQueryReset = supported12.HostQueryReset,
+        };
+        var core = new VkPhysicalDeviceFeatures
+        {
+            SamplerAnisotropy = supported.Features.SamplerAnisotropy,
+            DepthClamp = supported.Features.DepthClamp,
+        };
         Device = PhysicalDevice.CreateDevice(
             new DeviceEx.CreateInfo
             {
                 Extensions = ["VK_KHR_swapchain"],
                 QueueCreateInfos = new ReadOnlySpan<VkDeviceQueueCreateInfo>(&queueInfo, 1),
-                Next = &vulkan13,
+                Features = &core,
+                Next = &vulkan12,
             }
         );
+        (PipelineCache, _pipelineCachePath) = LoadPipelineCache(props);
         Queue = Device.GetQueue(QueueFamily, 0);
 
         _commandPool = Device.CreateCommandPool(
@@ -132,6 +194,52 @@ public sealed unsafe class GraphicsDevice : IDisposable
             CreateOffscreenTarget(size);
         else
             CreateSwapchain();
+    }
+
+    /// <summary>The pipeline cache from the last run on this GPU and driver, if any.</summary>
+    (VkPipelineCache, string) LoadPipelineCache(in VkPhysicalDeviceProperties props)
+    {
+        var cacheHome = Environment.GetEnvironmentVariable("XDG_CACHE_HOME")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache");
+        var id = props.VendorID.ToString("x") + "-" + props.DeviceID.ToString("x") + "-" + props.DriverVersion.ToString("x");
+        var path = Path.Combine(cacheHome, "trinity", $"pipelines-{id}.bin");
+        // The driver checks the header (GPU and driver UUID) and ignores data that doesn't match
+        var data = File.Exists(path) ? File.ReadAllBytes(path) : [];
+        fixed (byte* d = data)
+            return (Device.CreatePipelineCache(new VkPipelineCacheCreateInfo { InitialDataSize = (nuint)data.Length, InitialData = d }, null), path);
+    }
+
+    void SavePipelineCache()
+    {
+        try
+        {
+            var size = Device.GetPipelineCacheData_Count(PipelineCache);
+            var data = new byte[(int)size];
+            Device.GetPipelineCacheData_Write(PipelineCache, data);
+            Directory.CreateDirectory(Path.GetDirectoryName(_pipelineCachePath)!);
+            File.WriteAllBytes(_pipelineCachePath, data);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // A cache is only a speed-up
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="destroy"/> once the GPU has finished every frame that might use the
+    /// resource it frees: <see cref="FramesInFlight"/> frames from now, or at shutdown.
+    /// </summary>
+    public void Release(Action destroy) => _releases[FrameIndex].Add(destroy);
+
+    void RunReleases(int slot)
+    {
+        var list = _releases[slot];
+        if (list.Count == 0)
+            return;
+        var actions = list.ToArray();
+        list.Clear();
+        foreach (var a in actions)
+            a();
     }
 
     void CreateOffscreenTarget(VkExtent2D size)
@@ -353,6 +461,8 @@ public sealed unsafe class GraphicsDevice : IDisposable
             RecreateSwapchain();
 
         Device.WaitForFence(_inFlight[FrameIndex], nint.MaxValue);
+        FrameNumber++;
+        RunReleases(FrameIndex); // this slot's last frame is done with them
 
         if (_offscreen)
         {
@@ -424,8 +534,9 @@ public sealed unsafe class GraphicsDevice : IDisposable
             ImageLayout = VkImageLayout.DepthAttachmentOptimal,
             LoadOp = VkAttachmentLoadOp.Clear,
             StoreOp = VkAttachmentStoreOp.DontCare,
-            ClearValue = new VkClearValue { DepthStencil = new VkClearDepthStencilValue { Depth = 1f } },
+            ClearValue = new VkClearValue { DepthStencil = new VkClearDepthStencilValue { Depth = 0f } }, // reversed depth: 0 is far
         };
+        _rendering = true;
         cmd.BeginRendering(
             new VkRenderingInfo
             {
@@ -451,8 +562,9 @@ public sealed unsafe class GraphicsDevice : IDisposable
     /// </param>
     public void EndFrame(CommandBuffer cmd, GpuBuffer? capture = null, bool endRendering = true)
     {
-        if (endRendering)
+        if (endRendering && _rendering)
             cmd.EndRendering();
+        _rendering = false;
         var oldLayout = VkImageLayout.ColorAttachmentOptimal;
         if (capture != null)
         {
@@ -564,12 +676,28 @@ public sealed unsafe class GraphicsDevice : IDisposable
         Device.FreeCommandBuffers(_commandPool, [cmd]);
     }
 
+    /// <summary>Ends rendering started by <see cref="BeginRendering"/>, for a frame that draws more passes after it.</summary>
+    public void EndRendering(CommandBuffer cmd)
+    {
+        if (_rendering)
+            cmd.EndRendering();
+        _rendering = false;
+    }
+
     /// <summary>Blocks until the GPU has finished everything submitted so far.</summary>
     public void WaitIdle() => Device.WaitIdle();
 
     public void Dispose()
     {
         Device.WaitIdle();
+        // Releasing one thing can queue the release of another (a texture frees its image): drain until empty
+        while (_releases[0].Count > 0 || _releases[1].Count > 0)
+        {
+            RunReleases(0);
+            RunReleases(1);
+        }
+        SavePipelineCache();
+        Device.DestroyPipelineCache(PipelineCache, null);
         DestroySwapchainResources(destroySwapchain: true);
         for (var i = 0; i < FramesInFlight; i++)
         {

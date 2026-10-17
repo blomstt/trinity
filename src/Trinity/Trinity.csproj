@@ -6,6 +6,7 @@
     <ProjectReference Include="../Trinity.Core/Trinity.Core.csproj" />
     <ProjectReference Include="../Trinity.Graphics/Trinity.Graphics.csproj" />
     <ProjectReference Include="../Trinity.Animation/Trinity.Animation.csproj" />
+    <ProjectReference Include="../Trinity.Rendering/Trinity.Rendering.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- Every game built on Trinity gets these next to its executable -->

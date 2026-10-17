@@ -8,23 +8,66 @@ public struct SkinnedVertex
 {
     public Vector3 Position;
     public Vector3 Normal;
+    public Vector4 Tangent; // xyz tangent, w handedness (bitangent = cross(normal, tangent) * w)
+    public Vector2 Uv;
     public ushort J0, J1, J2, J3; // joint indices into the skin
     public Vector4 Weights;
-    public uint Color; // RGBA8: base colour (sRGB)
 }
+
+public enum AlphaMode
+{
+    Opaque,
+    Mask,
+    Blend,
+}
+
+public enum TextureWrap
+{
+    Repeat,
+    Clamp,
+    Mirror,
+}
+
+/// <summary>A texture a material uses: which of the model's images, and how it's sampled.</summary>
+public readonly record struct ModelTexture(int Image, TextureWrap WrapU, TextureWrap WrapV, bool Nearest);
+
+/// <summary>A glTF metallic-roughness material. Texture fields index <see cref="SkinnedModel.Textures"/>, or -1 for none.</summary>
+public sealed record ModelMaterial
+{
+    public string Name { get; init; } = "";
+    public Vector4 BaseColor { get; init; } = Vector4.One; // linear
+    public float Metallic { get; init; } = 1;
+    public float Roughness { get; init; } = 1;
+    public Vector3 Emissive { get; init; } // linear, already multiplied by any emissive strength
+    public float NormalScale { get; init; } = 1;
+    public float OcclusionStrength { get; init; } = 1;
+    public AlphaMode AlphaMode { get; init; }
+    public float AlphaCutoff { get; init; } = 0.5f;
+    public bool DoubleSided { get; init; }
+    public int BaseColorTexture { get; init; } = -1;
+    public int MetallicRoughnessTexture { get; init; } = -1;
+    public int NormalTexture { get; init; } = -1;
+    public int OcclusionTexture { get; init; } = -1;
+    public int EmissiveTexture { get; init; } = -1;
+}
+
+/// <summary>A run of indices drawn with one material. <see cref="Lod"/> is 0 (close) or 1 (far).</summary>
+public readonly record struct Submesh(int FirstIndex, int IndexCount, int Material, int Lod);
 
 /// <summary>Where one baked clip sits in the bone-matrix table.</summary>
 public readonly record struct BakedClip(string Name, int FirstFrame, int FrameCount, float Duration);
 
 /// <summary>
-/// A skinned character from a glTF file, with every animation baked at a fixed rate into one table of
+/// A model from a glTF file: geometry with normals, tangents and UVs, its materials and images, and
+/// for a skinned character with every animation baked at a fixed rate into one table of
 /// bone matrices: frame f, joint j lives at (f * JointCount + j). The GPU skins characters from that table,
 /// so playing an animation costs one lookup per bone and nothing on the CPU.
 ///
 /// Reads glTF with <see cref="GltfFile"/>. A rigged model needs mesh nodes named *LOD0 (and
 /// optionally *LOD1) sharing one skin. Any other glTF loads as a static model: every mesh, placed by
 /// its node transforms, drawn with one still "bone" and a one-frame "static" clip, so the same
-/// shaders draw both kinds. Materials give base colours; textures arrive with the renderer (E2).
+/// shaders draw both kinds. Materials and images are read as glTF describes them; the renderer
+/// uploads them. Missing tangents are generated from the UVs.
 /// </summary>
 public sealed class SkinnedModel
 {
@@ -33,6 +76,12 @@ public sealed class SkinnedModel
     public SkinnedVertex[] Vertices = [];
     public uint[] Indices = [];
     public (int FirstIndex, int IndexCount) Lod0, Lod1;
+    public readonly List<Submesh> Submeshes = [];
+    public readonly List<ModelMaterial> Materials = [];
+    public readonly List<ModelTexture> Textures = [];
+
+    /// <summary>Encoded image files (PNG, JPEG) the textures use; a loader may null them once read.</summary>
+    public readonly List<byte[]?> Images = [];
     public int JointCount;
     public readonly List<BakedClip> Clips = [];
     /// <summary>Each bone matrix as three float4 rows of the 3x4 affine transform.</summary>
@@ -48,6 +97,7 @@ public sealed class SkinnedModel
     {
         _gltf = GltfFile.Load(path);
         _doc = _gltf.Doc;
+        ReadMaterials();
 
         var vertices = new List<SkinnedVertex>();
         var indices = new List<uint>();
@@ -57,7 +107,7 @@ public sealed class SkinnedModel
             IsRigged = true;
             var lod1 = FindMeshNode("LOD1") ?? lod0;
             Lod0 = AppendMesh(lod0, vertices, indices, Matrix4x4.Identity);
-            Lod1 = AppendMesh(lod1, vertices, indices, Matrix4x4.Identity);
+            Lod1 = lod1 == lod0 ? Lod0 : AppendMesh(lod1, vertices, indices, Matrix4x4.Identity, lod: 1);
             Vertices = vertices.ToArray();
             Indices = indices.ToArray();
             Bake(_doc.Skins[skin]);
@@ -104,60 +154,131 @@ public sealed class SkinnedModel
     GltfNode? FindMeshNode(string suffix) =>
         _doc.Nodes.FirstOrDefault(n => n.Mesh is not null && (n.Name ?? "").EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
 
-    (int, int) AppendMesh(GltfNode node, List<SkinnedVertex> vertices, List<uint> indices, Matrix4x4 transform)
+    (int, int) AppendMesh(GltfNode node, List<SkinnedVertex> vertices, List<uint> indices, Matrix4x4 transform, int lod = 0)
     {
         var first = indices.Count;
         foreach (var prim in _doc.Meshes[node.Mesh!.Value].Primitives)
         {
-            var baseVertex = (uint)vertices.Count;
+            var baseVertex = vertices.Count;
+            var firstIndex = indices.Count;
             var pos = ReadFloats(prim.Attributes["POSITION"]);
-            var nrm = prim.Attributes.TryGetValue("NORMAL", out var ni) ? ReadFloats(ni) : Enumerable.Repeat(new[] { 0f, 1f, 0f }, pos.Length / 3).SelectMany(x => x).ToArray();
             var count = pos.Length / 3;
+            var nrm = prim.Attributes.TryGetValue("NORMAL", out var ni) ? ReadFloats(ni) : null;
+            var uv = prim.Attributes.TryGetValue("TEXCOORD_0", out var ui) ? ReadFloats(ui) : new float[count * 2];
+            var tan = prim.Attributes.TryGetValue("TANGENT", out var ti) ? ReadFloats(ti) : null;
             var joints = prim.Attributes.TryGetValue("JOINTS_0", out var j) ? ReadFloats(j) : new float[count * 4];
             var weights = prim.Attributes.TryGetValue("WEIGHTS_0", out var w0) ? ReadFloats(w0) : new float[count * 4];
 
-            // Colour from the material
-            var color = Vector4.One;
-            if (prim.Material is { } m)
-            {
-                var mat = _doc.Materials[m];
-                if (mat.PbrMetallicRoughness?.BaseColorFactor is [var r, var g, var b, ..])
-                    color = new Vector4(r, g, b, 1);
-            }
-            var packed = PackColor(color);
-
-            for (var v = 0; v < pos.Length / 3; v++)
+            for (var v = 0; v < count; v++)
             {
                 var w = new Vector4(weights[v * 4], weights[v * 4 + 1], weights[v * 4 + 2], weights[v * 4 + 3]);
                 var sum = w.X + w.Y + w.Z + w.W;
+                var normal = nrm == null ? Vector3.UnitY : new Vector3(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]);
+                var tangent = tan == null ? Vector4.Zero : new Vector4(tan[v * 4], tan[v * 4 + 1], tan[v * 4 + 2], tan[v * 4 + 3]);
+                var t3 = Vector3.TransformNormal(new Vector3(tangent.X, tangent.Y, tangent.Z), transform);
                 vertices.Add(
                     new SkinnedVertex
                     {
                         Position = Vector3.Transform(new Vector3(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]), transform),
-                        Normal = Vector3.Normalize(Vector3.TransformNormal(new Vector3(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]), transform)),
+                        Normal = Vector3.Normalize(Vector3.TransformNormal(normal, transform)),
+                        Tangent = t3 == Vector3.Zero ? Vector4.Zero : new Vector4(Vector3.Normalize(t3), tangent.W < 0 ? -1 : 1),
+                        Uv = new Vector2(uv[v * 2], uv[v * 2 + 1]),
                         J0 = (ushort)joints[v * 4], J1 = (ushort)joints[v * 4 + 1],
                         J2 = (ushort)joints[v * 4 + 2], J3 = (ushort)joints[v * 4 + 3],
                         Weights = sum > 0 ? w / sum : new Vector4(1, 0, 0, 0),
-                        Color = packed,
                     }
                 );
             }
             if (prim.Indices is { } ix)
                 foreach (var i in ReadFloats(ix))
-                    indices.Add(baseVertex + (uint)i);
+                    indices.Add((uint)(baseVertex + i));
             else
-                for (var i = 0u; i < count; i++)
-                    indices.Add(baseVertex + i);
+                for (var i = 0; i < count; i++)
+                    indices.Add((uint)(baseVertex + i));
+            if (tan == null)
+                GenerateTangents(vertices, indices, baseVertex, firstIndex);
+            Submeshes.Add(new Submesh(firstIndex, indices.Count - firstIndex, prim.Material ?? -1, lod));
         }
         return (first, indices.Count - first);
     }
 
-    static uint PackColor(Vector4 linear)
+    /// <summary>Per-vertex tangents from the UV directions of the triangles around each vertex (Lengyel's method).</summary>
+    static void GenerateTangents(List<SkinnedVertex> vertices, List<uint> indices, int baseVertex, int firstIndex)
     {
-        // glTF base colours are linear; store sRGB bytes so the shader can unpack and linearise once
-        static uint Srgb(float c) =>
-            (uint)Math.Clamp(MathF.Round(255 * (c <= 0.0031308f ? c * 12.92f : 1.055f * MathF.Pow(c, 1 / 2.4f) - 0.055f)), 0, 255);
-        return Srgb(linear.X) | Srgb(linear.Y) << 8 | Srgb(linear.Z) << 16 | 255u << 24;
+        var n = vertices.Count - baseVertex;
+        var tan = new Vector3[n];
+        var bit = new Vector3[n];
+        for (var i = firstIndex; i + 2 < indices.Count; i += 3)
+        {
+            int a = (int)indices[i] - baseVertex, b = (int)indices[i + 1] - baseVertex, c = (int)indices[i + 2] - baseVertex;
+            var va = vertices[baseVertex + a];
+            var vb = vertices[baseVertex + b];
+            var vc = vertices[baseVertex + c];
+            var e1 = vb.Position - va.Position;
+            var e2 = vc.Position - va.Position;
+            var d1 = vb.Uv - va.Uv;
+            var d2 = vc.Uv - va.Uv;
+            var det = d1.X * d2.Y - d2.X * d1.Y;
+            if (MathF.Abs(det) < 1e-12f)
+                continue;
+            var r = 1 / det;
+            var t = (e1 * d2.Y - e2 * d1.Y) * r;
+            var bt = (e2 * d1.X - e1 * d2.X) * r;
+            tan[a] += t; tan[b] += t; tan[c] += t;
+            bit[a] += bt; bit[b] += bt; bit[c] += bt;
+        }
+        for (var v = 0; v < n; v++)
+        {
+            var vertex = vertices[baseVertex + v];
+            var normal = vertex.Normal;
+            var t = tan[v] - normal * Vector3.Dot(normal, tan[v]);
+            if (t.LengthSquared() < 1e-12f)
+            {
+                // No usable UVs here: any direction along the surface will do
+                t = MathF.Abs(normal.Y) < 0.99f ? Vector3.Cross(Vector3.UnitY, normal) : Vector3.Cross(Vector3.UnitX, normal);
+            }
+            t = Vector3.Normalize(t);
+            var w = Vector3.Dot(Vector3.Cross(normal, t), bit[v]) < 0 ? -1f : 1f;
+            vertex.Tangent = new Vector4(t, w);
+            vertices[baseVertex + v] = vertex;
+        }
+    }
+
+    void ReadMaterials()
+    {
+        foreach (var image in _doc.Images.Select((_, i) => i))
+            Images.Add(_gltf.ImageBytes(image));
+        foreach (var t in _doc.Textures)
+        {
+            var sampler = t.Sampler is { } si ? _doc.Samplers[si] : new GltfSampler2D();
+            static TextureWrap Wrap(int mode) => mode switch { 33071 => TextureWrap.Clamp, 33648 => TextureWrap.Mirror, _ => TextureWrap.Repeat };
+            Textures.Add(new ModelTexture(t.Source ?? -1, Wrap(sampler.WrapS), Wrap(sampler.WrapT), sampler.MagFilter == 9728));
+        }
+        foreach (var m in _doc.Materials)
+        {
+            var pbr = m.PbrMetallicRoughness ?? new GltfPbr();
+            var c = pbr.BaseColorFactor;
+            var e = m.EmissiveFactor;
+            var strength = m.Extensions?.EmissiveStrength?.EmissiveStrength ?? 1;
+            Materials.Add(new ModelMaterial
+            {
+                Name = m.Name ?? $"material{Materials.Count}",
+                BaseColor = c.Length >= 4 ? new Vector4(c[0], c[1], c[2], c[3]) : Vector4.One,
+                Metallic = pbr.MetallicFactor,
+                Roughness = pbr.RoughnessFactor,
+                Emissive = (e.Length >= 3 ? new Vector3(e[0], e[1], e[2]) : Vector3.Zero) * strength,
+                NormalScale = m.NormalTexture?.Scale ?? 1,
+                OcclusionStrength = m.OcclusionTexture?.Strength ?? 1,
+                AlphaMode = m.AlphaMode switch { "MASK" => AlphaMode.Mask, "BLEND" => AlphaMode.Blend, _ => AlphaMode.Opaque },
+                AlphaCutoff = m.AlphaCutoff,
+                DoubleSided = m.DoubleSided,
+                BaseColorTexture = pbr.BaseColorTexture?.Index ?? -1,
+                MetallicRoughnessTexture = pbr.MetallicRoughnessTexture?.Index ?? -1,
+                NormalTexture = m.NormalTexture?.Index ?? -1,
+                OcclusionTexture = m.OcclusionTexture?.Index ?? -1,
+                EmissiveTexture = m.EmissiveTexture?.Index ?? -1,
+            });
+        }
     }
 
     /// <summary>Reads any accessor as floats, following the byte stride and component type.</summary>

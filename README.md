@@ -10,9 +10,9 @@ A game is its own C# project that uses Trinity as a library, made and run from T
 
 | Measured (17 Oct 2026), native build | Trinity Editor | Sandbox sample |
 |---|---|---|
-| On disk, everything that ships | 8.8 MB (5.5 MB executable) | 6.7 MB (4.7 MB executable, 0.3 MB assets) |
-| Start to ready | 0.1 s (JIT: 0.3 s) | 0.1 s (JIT: 0.25 s) |
-| Memory | 112 MB with an empty project (JIT: 162 MB); most of it is the Vulkan driver | 145 MB peak (JIT: 174 MB) |
+| On disk, everything that ships | 9.3 MB (6.0 MB executable) | 11 MB with its test models (5.2 MB executable) |
+| Start to ready | 0.1 s (JIT: 0.3 s) | 0.1 s (JIT: 0.28 s) |
+| Memory | 53 MB resident when idle with an empty project, 150 MB peak at start | 145 MB peak (JIT: 174 MB) |
 | Threads / CPU when idle | 7 / 0% (JIT: 12) | — |
 
 ## Status
@@ -23,16 +23,35 @@ Early. Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md). Decisions: [docs/adr/](docs/
 |---|---|---|
 | `Trinity.Core` | Window (with fullscreen), input actions for keyboard, mouse and gamepad, player settings, `Jobs.For`, logging, required credits | E1 done |
 | `Trinity.Graphics` | Vulkan device and frame loop, GPU buffers, textures, SPIR-V shader loading, pipelines, cameras and frustums, video recording | First version |
-| `Trinity.Animation` | glTF skinned models (its own small `.glb`/`.gltf` reader), animation baked for GPU skinning | First version |
+| `Trinity.Animation` | glTF models (its own small `.glb`/`.gltf` reader): meshes with tangents, materials, images, skins; animation baked for GPU skinning | First version |
+| `Trinity.Rendering` | The renderer: HDR forward PBR, bindless materials and textures, procedural sky, cascaded shadows, fog, tone mapping, culling, debug lines | E2 done |
 | `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit. `Trinity.Scenes`: scene files, C# scripts on nodes, `SceneRenderer`, `SceneGame` | E1 done; scenes and scripts first version |
 | `Trinity.Generators` | Build-time only: registers a game's scripts and their Inspector fields, so scripts need no reflection (NativeAOT) | First version |
 | `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy, inspector, assets, log, stats, a C# script editor, ▶ Play with hot reload | First version |
-| `samples/Sandbox` | A scene made in the editor, brought to life by four small scripts: the scripting example | Runs |
+| `samples/Sandbox` | Scenes made in the editor with small scripts: scripting (`main`), a material test (`materials`), and a 5,000-character stress test with a day cycle (`crowd`) | Runs |
 | `tests/Trinity.Tests` | Unit tests for the core, scenes and scripting | 24 passing |
+
+## Renderer
+
+Each frame: four cascaded shadow maps for the sun, then opaque meshes in HDR (`RGBA16F`), the procedural sky behind them, transparent meshes sorted back to front, then exposure and tone mapping into the window (or an editor viewport) with debug lines on top.
+
+- **Materials:** glTF metallic-roughness: base colour, metallic-roughness, normal, occlusion and emissive textures; opaque, alpha-masked and alpha-blended; one- or two-sided. GGX specular with height-correlated Smith visibility, Lambert diffuse.
+- **Textures are bindless:** every texture in one descriptor array (16,384 slots here), every material in one GPU buffer; a draw passes a material index. GPUs without descriptor indexing get a fixed array of 64 with the same shaders (`TRINITY_NO_BINDLESS=1` forces it). Images decode on worker threads and upload a few per frame, with mipmaps, showing placeholders until they arrive; models load on worker threads too.
+- **Sky:** a physically based atmosphere (Rayleigh, Mie, ozone; after Hillaire 2020) computed on the GPU into lookup tables when the sun or sky changes (0.11 ms), giving the sky, the sun's colour, diffuse sky light (spherical harmonics) and reflections (a cubemap prefiltered by roughness). Nothing is baked.
+- **Shadows:** four cascades of 2048², fitted as spheres and snapped to texels so they don't shimmer, blended at the seams, 3×3 filtered compare samples, normal-offset and slope bias. Skinned and alpha-masked casters cast correctly.
+- **Fog and tone mapping:** exponential height fog coloured by the sky in the view direction, in linear HDR; exposure in stops; AgX-style or ACES tone mapping.
+- **Culling and LOD:** per pass (the camera and each cascade), bounding spheres are tested against the frustum and far instances use their low-detail mesh; vertex shaders read instances through the visible list.
+- **Debug:** `Debug.Line`, `Debug.Box`, `Debug.Sphere`, `Debug.Arrow` (for a frame or some seconds, depth-tested or on top); they compile away in Release builds. Viewport shading views: albedo, normals, shadow cascades. GPU time per pass is measured with timestamps (editor Stats panel, game status line).
+- **Scenes carry their environment:** sun angle and strength, haze, shadows, fog, exposure and tone mapper, edited in the editor's Environment panel; scripts can change it at runtime (`samples/Sandbox/Scripts/DayCycle.cs`).
+
+| GPU time (RX 9070 XT, 1600×900) | Total | Shadows | Opaque | Sky |
+|---|---|---|---|---|
+| Material test: 87,000 triangles, textures, glass | 0.4 ms | 0.24 ms | 0.12 ms | 0.01 ms |
+| 5,000 animated characters, moving sun | 0.72 ms (3.4 ms before culling) | 0.36 ms | 0.23 ms | 0.11 ms (update) |
 
 ## Shaders
 
-GLSL files in a project's `Shaders/` folder (`.vert`, `.frag`, `.comp`) are compiled by `glslc` (Arch: `shaderc`) during `dotnet build` and shipped as `Shaders/<name>.spv`. `#include "skinning.glsl"` and other includes resolve from the project's `Shaders/` folder and `Trinity.Animation/Shaders/`. At runtime `ShaderLibrary.Load("crowd.vert")` just reads the `.spv`. After editing a shader, rebuild.
+GLSL files in a project's `Shaders/` folder (`.vert`, `.frag`, `.comp`) are compiled by `glslc` (Arch: `shaderc`) during `dotnet build` and shipped as `Shaders/<name>.spv`. `#include "skinning.glsl"` and other includes resolve from the project's `Shaders/` folder and `Trinity.Animation/Shaders/`. At runtime `ShaderLibrary.Load("mesh.vert")` just reads the `.spv`. After editing a shader, rebuild.
 
 ## Build and run
 

@@ -1,7 +1,11 @@
 // Trinity GPU skinning from a GpuBoneTable. Include from a vertex shader, then call
 // skinMatrix(clip, seconds, loop, joints, weights) to get the 3x4 skinning matrix.
 
-layout(std430, set = 0, binding = 0) readonly buffer TrinityBones {
+#ifndef TRINITY_BONES_SET
+#define TRINITY_BONES_SET 0
+#endif
+
+layout(std430, set = TRINITY_BONES_SET, binding = 0) readonly buffer TrinityBones {
     vec4 header;  // joint count, bake fps, clip count
     vec4 data[];  // clip records (first frame, frame count, duration), then bone rows
 } trinityBones;

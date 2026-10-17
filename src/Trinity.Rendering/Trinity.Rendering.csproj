@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Trinity renderer: HDR forward rendering of meshes with PBR materials, shadows, sky, fog and tone mapping.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Trinity.Graphics/Trinity.Graphics.csproj" />
+    <ProjectReference Include="../Trinity.Animation/Trinity.Animation.csproj" />
+  </ItemGroup>
+</Project>

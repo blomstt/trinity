@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// One mip of the environment cubemap, prefiltered for a GGX roughness: the reflection a surface of
+// that roughness sees. Importance-sampled from the top mip, reading blurrier mips for rarer samples
+// so few samples suffice (filtered importance sampling).
+
+#include "cube.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray outCube;
+layout(set = 0, binding = 4) uniform samplerCube source;
+layout(push_constant) uniform Prefilter { float roughness; float sourceSize; } pc;
+
+const float PI = 3.14159265359;
+
+vec2 hammersley(uint i, uint n) {
+    uint b = bitfieldReverse(i);
+    return vec2(float(i) / float(n), float(b) * 2.3283064365386963e-10);
+}
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    int size = imageSize(outCube).x;
+    if (p.x >= size || p.y >= size) return;
+    vec3 n = cubeDirection(p.z, (vec2(p.xy) + 0.5) / float(size));
+    vec3 v = n;
+    float a = pc.roughness * pc.roughness;
+    vec3 up = abs(n.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    vec3 tx = normalize(cross(up, n));
+    vec3 ty = cross(n, tx);
+
+    const uint SAMPLES = 64u;
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint i = 0u; i < SAMPLES; i++) {
+        vec2 xi = hammersley(i, SAMPLES);
+        float phi = 2.0 * PI * xi.x;
+        float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+        vec3 h = tx * (sinTheta * cos(phi)) + ty * (sinTheta * sin(phi)) + n * cosTheta;
+        vec3 l = normalize(2.0 * dot(v, h) * h - v);
+        float nl = dot(n, l);
+        if (nl <= 0.0) continue;
+        // Mip to read from: the solid angle this sample stands for, against a texel's
+        float nh = max(dot(n, h), 0.0);
+        float d = (a * a) / (PI * pow(nh * nh * (a * a - 1.0) + 1.0, 2.0));
+        float pdf = d * nh / (4.0 * max(dot(v, h), 1e-4)) + 1e-4;
+        float sampleAngle = 1.0 / (float(SAMPLES) * pdf);
+        float texelAngle = 4.0 * PI / (6.0 * pc.sourceSize * pc.sourceSize);
+        float lod = max(0.5 * log2(sampleAngle / texelAngle) + 1.0, 0.0);
+        sum += textureLod(source, l, lod).rgb * nl;
+        weight += nl;
+    }
+    imageStore(outCube, p, vec4(sum / max(weight, 1e-4), 1.0));
+}

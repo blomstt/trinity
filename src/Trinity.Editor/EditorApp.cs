@@ -15,7 +15,7 @@ namespace Trinity.Editor;
 sealed class EditorApp : IDisposable
 {
     const string ViewportPanel = "Viewport", HierarchyPanel = "Hierarchy", InspectorPanel = "Inspector";
-    const string AssetsPanel = "Assets", LogPanel = "Log", StatsPanel = "Stats";
+    const string AssetsPanel = "Assets", LogPanel = "Log", StatsPanel = "Stats", EnvironmentPanel = "Environment";
 
     readonly Window _window;
     readonly GraphicsDevice _gpu;
@@ -34,7 +34,9 @@ sealed class EditorApp : IDisposable
     ImTextureRef? _viewportTexture;
     int _viewportWidth = 1280, _viewportHeight = 720;
     bool _layoutBuilt;
-    bool _showHierarchy = true, _showInspector = true, _showAssets = true, _showLog = true, _showStats = true;
+    bool _showHierarchy = true, _showInspector = true, _showAssets = true, _showLog = true, _showStats = true, _showEnvironment = true;
+    ImGuiID _inspectorDock;
+    int _dragAxis = -1;
     readonly ImInputString _nameEdit = new(128);
     readonly ImInputString _saveAsEdit = new(128);
     Node? _nameEditFor;
@@ -63,9 +65,11 @@ sealed class EditorApp : IDisposable
         if (Environment.GetEnvironmentVariable("TRINITY_SKIP_SPLASH") != "1")
             Splash.Show(_window, _gpu, _shaders);
         _view = new SceneView(_gpu, _shaders, project);
+        _view.AssetReady += Window.Wake;
 
         var main = Path.Combine(project.ScenesPath, "main.scene.json");
         _scene = File.Exists(main) ? EditorScene.Load(main) : new EditorScene { Path = main };
+        UseSceneCamera();
         Log.Info("editor", $"project {project.Name} at {project.Root}, scene {project.Relative(_scene.Path!)}");
     }
 
@@ -110,7 +114,7 @@ sealed class EditorApp : IDisposable
             // on Wayland each presented frame wakes the event wait again, so waiting isn't enough.
             Window.PollEvents();
             var t = clock.Elapsed.TotalSeconds;
-            var changed = _scene.Objects.Any(o => o.Playing) || t - lastActivity < 0.5 || _logChanged || Screenshot != null;
+            var changed = _scene.Objects.Any(o => o.Playing) || t - lastActivity < 0.5 || _logChanged || _view.Loading || Screenshot != null;
             if (!changed && t - lastFrame < 1.0)
             {
                 Window.WaitEvents(1.0 - (t - lastFrame));
@@ -130,7 +134,7 @@ sealed class EditorApp : IDisposable
             {
                 if (_viewportTexture is { } old)
                     _ui.RemoveTexture(old);
-                _viewportTexture = _ui.AddTexture(_view.Target!.Sampler, _view.Target.ColorView);
+                _viewportTexture = _ui.AddTexture(_view.Sampler, _view.Output!.View);
             }
 
             _ui.NewFrame();
@@ -205,6 +209,7 @@ sealed class EditorApp : IDisposable
         if (_showAssets) Assets();
         if (_showLog) LogWindow();
         if (_showStats) Stats();
+        if (_showEnvironment) EnvironmentWindow();
     }
 
     /// <summary>Hierarchy left, inspector and stats right, assets and log below, viewport in the middle.</summary>
@@ -215,6 +220,7 @@ sealed class EditorApp : IDisposable
         ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.28f, out var bottom, out var centre);
         ImGui.Internal.DockBuilderSplitNode(right, ImGuiDir.Down, 0.30f, out var rightBottom, out var rightTop);
         ImGui.Internal.DockBuilderDockWindow(HierarchyPanel, left);
+        ImGui.Internal.DockBuilderDockWindow(EnvironmentPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(InspectorPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(StatsPanel, rightBottom);
         ImGui.Internal.DockBuilderDockWindow(AssetsPanel, bottom);
@@ -265,6 +271,15 @@ sealed class EditorApp : IDisposable
             ImGui.MenuItem(AssetsPanel, default, ref _showAssets);
             ImGui.MenuItem(LogPanel, default, ref _showLog);
             ImGui.MenuItem(StatsPanel, default, ref _showStats);
+            ImGui.MenuItem(EnvironmentPanel, default, ref _showEnvironment);
+            ImGui.Separator();
+            if (ImGui.BeginMenu("Viewport shading"))
+            {
+                foreach (var (name, mode) in new[] { ("Lit", Trinity.Rendering.DebugView.None), ("Albedo", Trinity.Rendering.DebugView.Albedo), ("Normals", Trinity.Rendering.DebugView.Normals), ("Shadow cascades", Trinity.Rendering.DebugView.Cascades) })
+                    if (ImGui.MenuItem(name, default, _view.DebugView == mode))
+                        _view.DebugView = mode;
+                ImGui.EndMenu();
+            }
             ImGui.MenuItem(ScriptPanel.Title, default, ref _scripts.Show);
             ImGui.EndMenu();
         }
@@ -364,11 +379,18 @@ sealed class EditorApp : IDisposable
         var size = ImGui.GetContentRegionAvail();
         _viewportWidth = Math.Max(8, (int)size.X);
         _viewportHeight = Math.Max(8, (int)size.Y);
+        var origin = ImGui.GetCursorScreenPos();
         if (_viewportTexture is { } texture)
             ImGui.Image(texture, size);
+        // Owns every mouse button over the image, so dragging there never moves the panel
+        ImGui.SetCursorScreenPos(origin);
+        ImGui.InvisibleButton("##viewport", size, ImGuiButtonFlags.MouseButtonLeft | ImGuiButtonFlags.MouseButtonRight | ImGuiButtonFlags.MouseButtonMiddle);
 
-        // Right drag orbits, middle drag (or Shift + right) pans, the wheel zooms; F frames the selection
+        // Left click selects (or grabs the move gizmo); right drag orbits, middle drag (or Shift + right)
+        // pans, the wheel zooms; F frames the selection
         var io = ImGui.GetIO();
+        var mouse = new Vector2(io.MousePos.X - origin.X, io.MousePos.Y - origin.Y);
+        MoveGizmo(mouse, ImGui.IsItemHovered());
         if (ImGui.IsItemHovered())
         {
             var d = io.MouseDelta;
@@ -392,6 +414,105 @@ sealed class EditorApp : IDisposable
         }
         ImGui.End();
         ImGui.PopStyleVar();
+    }
+
+    /// <summary>Hovering, grabbing and dragging the selection's move arrows; a click elsewhere picks.</summary>
+    void MoveGizmo(Vector2 mouse, bool hovered)
+    {
+        var io = ImGui.GetIO();
+        if (_dragAxis >= 0)
+        {
+            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left) || _selected == null)
+            {
+                _dragAxis = -1;
+                return;
+            }
+            var (p0, p1) = GizmoAxisOnScreen(_selected, _dragAxis);
+            if (p0 is { } a && p1 is { } b)
+            {
+                var s = b - a;
+                var t = Vector2.Dot(new Vector2(io.MouseDelta.X, io.MouseDelta.Y), s) / MathF.Max(s.LengthSquared(), 1);
+                ReadOnlySpan<Vector3> axes = [Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ];
+                _selected.Position += axes[_dragAxis] * _view.GizmoLength(_selected) * t;
+                _scene.Dirty = true;
+            }
+            return;
+        }
+        _view.GizmoAxis = hovered && _selected != null ? HoveredAxis(_selected, mouse) : -1;
+        if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            if (_view.GizmoAxis >= 0)
+                _dragAxis = _view.GizmoAxis;
+            else
+                _selected = _view.Pick(_scene, _view.Ray(mouse));
+        }
+    }
+
+    (Vector2?, Vector2?) GizmoAxisOnScreen(Node o, int axis)
+    {
+        ReadOnlySpan<Vector3> axes = [Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ];
+        return (_view.ToScreen(o.Position), _view.ToScreen(o.Position + axes[axis] * _view.GizmoLength(o)));
+    }
+
+    int HoveredAxis(Node o, Vector2 mouse)
+    {
+        var best = -1;
+        var bestDistance = 8f; // pixels
+        for (var a = 0; a < 3; a++)
+        {
+            if (GizmoAxisOnScreen(o, a) is not ({ } p0, { } p1))
+                continue;
+            var s = p1 - p0;
+            var t = Math.Clamp(Vector2.Dot(mouse - p0, s) / MathF.Max(s.LengthSquared(), 1), 0, 1);
+            var d = Vector2.Distance(mouse, p0 + s * t);
+            if (d < bestDistance)
+                (best, bestDistance) = (a, d);
+        }
+        return best;
+    }
+
+    void EnvironmentWindow()
+    {
+        ImGui.SetNextWindowDockID(_inspectorDock, ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin(EnvironmentPanel, ref _showEnvironment))
+        {
+            ImGui.End();
+            return;
+        }
+        var e = _scene.File.Environment;
+        var changed = false;
+        ImGui.SeparatorText("Sun");
+        var azimuth = e.SunAzimuth;
+        if (ImGui.DragFloat("Azimuth", ref azimuth, 0.5f, 0, 360, "%.1f°")) { e.SunAzimuth = azimuth; changed = true; }
+        var elevation = e.SunElevation;
+        if (ImGui.DragFloat("Elevation", ref elevation, 0.2f, -10, 90, "%.1f°")) { e.SunElevation = elevation; changed = true; }
+        var illuminance = e.SunIlluminance;
+        if (ImGui.DragFloat("Illuminance", ref illuminance, 0.05f, 0, 100)) { e.SunIlluminance = illuminance; changed = true; }
+        ImGui.SeparatorText("Sky and fog");
+        var haze = e.Haze;
+        if (ImGui.DragFloat("Haze", ref haze, 0.02f, 0, 20)) { e.Haze = haze; changed = true; }
+        var fog = e.FogDensity * 1000;
+        if (ImGui.DragFloat("Fog density", ref fog, 0.05f, 0, 100, "%.2f / km")) { e.FogDensity = fog / 1000; changed = true; }
+        var falloff = e.FogHeightFalloff;
+        if (ImGui.DragFloat("Fog height falloff", ref falloff, 0.002f, 0, 1)) { e.FogHeightFalloff = falloff; changed = true; }
+        ImGui.SeparatorText("Shadows");
+        var shadows = e.Shadows;
+        if (ImGui.Checkbox("Sun shadows", ref shadows)) { e.Shadows = shadows; changed = true; }
+        var distance = e.ShadowDistance;
+        if (ImGui.DragFloat("Distance", ref distance, 0.5f, 5, 1000, "%.0f m")) { e.ShadowDistance = distance; changed = true; }
+        ImGui.SeparatorText("Camera");
+        var exposure = e.Exposure;
+        if (ImGui.DragFloat("Exposure", ref exposure, 0.02f, -10, 10, "%+.2f stops")) { e.Exposure = exposure; changed = true; }
+        var aces = e.ToneMapper.Equals("ACES", StringComparison.OrdinalIgnoreCase);
+        if (ImGui.BeginCombo("Tone mapper", aces ? "ACES" : "AgX"))
+        {
+            if (ImGui.Selectable("AgX", !aces)) { e.ToneMapper = "AgX"; changed = true; }
+            if (ImGui.Selectable("ACES", aces)) { e.ToneMapper = "ACES"; changed = true; }
+            ImGui.EndCombo();
+        }
+        if (changed)
+            _scene.Dirty = true;
+        ImGui.End();
     }
 
     void Hierarchy()
@@ -428,6 +549,7 @@ sealed class EditorApp : IDisposable
     void Inspector()
     {
         ImGui.Begin(InspectorPanel, ref _showInspector);
+        _inspectorDock = ImGui.GetWindowDockID();
         if (_selected is not { } o)
         {
             ImGui.TextDisabled("Nothing selected");
@@ -719,6 +841,13 @@ sealed class EditorApp : IDisposable
         var cam = _view.Camera;
         ImGui.TextDisabled($"Camera at {cam.Target.X:F1}, {cam.Target.Y:F1}, {cam.Target.Z:F1}, {cam.Distance:F1} m out");
         ImGui.Text(_runner.Running ? "Game: running" : "Game: stopped");
+        var timer = _view.Renderer.Timer;
+        if (timer.Last.Count > 0)
+        {
+            ImGui.SeparatorText($"GPU {timer.TotalMs:F2} ms");
+            foreach (var (name, ms) in timer.Last)
+                ImGui.TextDisabled($"{name,-20} {ms,6:F3} ms");
+        }
         ImGui.End();
     }
 
@@ -763,16 +892,30 @@ sealed class EditorApp : IDisposable
         _selected = null;
     }
 
+    /// <summary>Starts the viewport where the scene's camera is, if it has one.</summary>
+    void UseSceneCamera()
+    {
+        if (_scene.File.Camera is { } c)
+            _view.Camera = new OrbitCamera
+            {
+                Target = c.Target,
+                Yaw = float.DegreesToRadians(c.Yaw),
+                Pitch = float.DegreesToRadians(c.Pitch),
+                Distance = c.Distance,
+            };
+    }
+
     void NewScene()
     {
         _scene = new EditorScene { Path = Path.Combine(_project.ScenesPath, "untitled.scene.json") };
         _selected = null;
     }
 
-    void OpenScene(string path)
+    public void OpenScene(string path)
     {
         _scene = EditorScene.Load(path);
         _selected = null;
+        UseSceneCamera();
         Log.Info("editor", $"opened {_project.Relative(path)}");
     }
 

@@ -123,7 +123,7 @@ public sealed unsafe class RenderTarget : IDisposable
             ImageLayout = VkImageLayout.DepthAttachmentOptimal,
             LoadOp = VkAttachmentLoadOp.Clear,
             StoreOp = VkAttachmentStoreOp.DontCare,
-            ClearValue = new VkClearValue { DepthStencil = new VkClearDepthStencilValue { Depth = 1f } },
+            ClearValue = new VkClearValue { DepthStencil = new VkClearDepthStencilValue { Depth = 0f } }, // reversed depth: 0 is far
         };
         var extent = new VkExtent2D { Width = Width, Height = Height };
         cmd.BeginRendering(
