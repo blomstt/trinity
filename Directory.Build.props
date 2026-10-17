@@ -18,4 +18,10 @@
     <BrutalVersion>2026.10.1</BrutalVersion>
     <BrutalVersion2>2026.10.2</BrutalVersion2>
   </PropertyGroup>
+  <!-- PublishAot switches off what hot reload needs in every build; turn it back on outside Release, so the
+       editor's Play (a Debug build under dotnet watch) can apply saved scripts. Release and published builds keep it off. -->
+  <PropertyGroup Condition="'$(Configuration)' != 'Release'">
+    <StartupHookSupport>true</StartupHookSupport>
+    <MetadataUpdaterSupport>true</MetadataUpdaterSupport>
+  </PropertyGroup>
 </Project>

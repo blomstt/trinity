@@ -1,8 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// Any model in the editor: skinned from its bone table (static models have one still bone),
-// placed by a per-object transform, playing the clip the inspector chose.
+// Any model in a scene: skinned from its bone table (static models have one still bone),
+// placed by a per-node transform, playing the node's clip.
 
 #include "skinning.glsl"
 
@@ -39,7 +39,7 @@ void main() {
     outNormal = vec4(n, 0.0) * place;
     outWorld = world;
 
-    // Army colour shows as a neutral steel blue in the editor
+    // Army colour shows as a neutral steel blue until a game sets its own
     vec3 base = pow(inColorTeam.rgb, vec3(2.2));
     outColor = inColorTeam.a > 0.5 ? pow(vec3(0.28, 0.36, 0.52), vec3(2.2)) * base * 1.6 : base;
     outSelected = inAnim.w;

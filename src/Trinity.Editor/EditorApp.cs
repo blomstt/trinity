@@ -1,8 +1,13 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Numerics;
+using System.Text;
+using System.Text.Json;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using Trinity.Graphics;
+using Trinity.Editor.Scripting;
+using Trinity.Scenes;
 
 namespace Trinity.Editor;
 
@@ -18,18 +23,21 @@ sealed class EditorApp : IDisposable
     readonly ImGuiHost _ui;
     readonly SceneView _view;
     readonly GameRunner _runner = new();
+    readonly ScriptPanel _scripts;
+    ImGuiID _viewportDock;
+    readonly Dictionary<string, ImInputString> _stringFields = [];
     readonly LogBuffer _log = new();
     readonly EditorProject _project;
     EditorScene _scene;
 
-    SceneObject? _selected;
+    Node? _selected;
     ImTextureRef? _viewportTexture;
     int _viewportWidth = 1280, _viewportHeight = 720;
     bool _layoutBuilt;
     bool _showHierarchy = true, _showInspector = true, _showAssets = true, _showLog = true, _showStats = true;
     readonly ImInputString _nameEdit = new(128);
     readonly ImInputString _saveAsEdit = new(128);
-    SceneObject? _nameEditFor;
+    Node? _nameEditFor;
     List<string> _assetFiles = [];
     double _assetsScanned = -10;
 
@@ -44,6 +52,13 @@ sealed class EditorApp : IDisposable
             "trinity-editor"
         );
         _ui = new ImGuiHost(_window, _gpu, config);
+        _scripts = new ScriptPanel(project, _ui.Mono);
+        _runner.Output += _scripts.Checker.Feed;
+        _scripts.Saved += () =>
+        {
+            if (_runner.Running && !GameRunner.HotReload)
+                _runner.Restart(_project);
+        };
         // BRUTAL License 2.2: the logo before the editor's main function
         if (Environment.GetEnvironmentVariable("TRINITY_SKIP_SPLASH") != "1")
             Splash.Show(_window, _gpu, _shaders);
@@ -52,6 +67,27 @@ sealed class EditorApp : IDisposable
         var main = Path.Combine(project.ScenesPath, "main.scene.json");
         _scene = File.Exists(main) ? EditorScene.Load(main) : new EditorScene { Path = main };
         Log.Info("editor", $"project {project.Name} at {project.Root}, scene {project.Relative(_scene.Path!)}");
+    }
+
+    /// <summary>Opens a script in the Script panel: a path relative to the project, optionally with :line.</summary>
+    public void OpenScript(string spec)
+    {
+        var colon = spec.LastIndexOf(':');
+        var line = colon > 0 && int.TryParse(spec[(colon + 1)..], out var l) ? l - 1 : -1;
+        var file = _project.Absolute(line >= 0 ? spec[..colon] : spec);
+        if (File.Exists(file))
+            _pendingScript = (file, line);
+        else
+            Log.Error("editor", $"no script at {file}");
+    }
+
+    (string File, int Line)? _pendingScript;
+
+    public void Select(string name)
+    {
+        _selected = _scene.Objects.FirstOrDefault(o => o.Name == name);
+        if (_selected == null)
+            Log.Error("editor", $"no object called {name} in the scene");
     }
 
     /// <summary>For checking the editor without a person: save the window to a PNG after a while, then quit.</summary>
@@ -113,6 +149,7 @@ sealed class EditorApp : IDisposable
         }
 
         Log.Written -= WakeOnLog;
+        _scripts.KeepUnsaved();
         if (_scene.Dirty && _scene.Path != null)
         {
             var backup = _scene.Path.Replace(".scene.json", ".autosave.scene.json");
@@ -153,9 +190,16 @@ sealed class EditorApp : IDisposable
                 BuildDefaultLayout(dock);
         }
 
+        _scripts.Checker.Watching = _runner.Running;
         MenuBar();
         Shortcuts();
         Viewport();
+        if (_pendingScript is { } pending)
+        {
+            _scripts.Open(pending.File, pending.Line);
+            _pendingScript = null;
+        }
+        _scripts.Draw(ImGui.GetTime(), _viewportDock);
         if (_showHierarchy) Hierarchy();
         if (_showInspector) Inspector();
         if (_showAssets) Assets();
@@ -175,6 +219,7 @@ sealed class EditorApp : IDisposable
         ImGui.Internal.DockBuilderDockWindow(StatsPanel, rightBottom);
         ImGui.Internal.DockBuilderDockWindow(AssetsPanel, bottom);
         ImGui.Internal.DockBuilderDockWindow(LogPanel, bottom);
+        ImGui.Internal.DockBuilderDockWindow(ScriptPanel.Title, centre);
         ImGui.Internal.DockBuilderDockWindow(ViewportPanel, centre);
         ImGui.Internal.DockBuilderFinish(dock);
     }
@@ -220,6 +265,7 @@ sealed class EditorApp : IDisposable
             ImGui.MenuItem(AssetsPanel, default, ref _showAssets);
             ImGui.MenuItem(LogPanel, default, ref _showLog);
             ImGui.MenuItem(StatsPanel, default, ref _showStats);
+            ImGui.MenuItem(ScriptPanel.Title, default, ref _scripts.Show);
             ImGui.EndMenu();
         }
         if (ImGui.BeginMenu("Help"))
@@ -229,7 +275,7 @@ sealed class EditorApp : IDisposable
         }
         if (ImGui.BeginMenu("Run"))
         {
-            if (ImGui.MenuItem("Play", "F5", false, !_runner.Running)) _runner.Play(_project);
+            if (ImGui.MenuItem("Play", "F5", false, !_runner.Running)) Play();
             if (ImGui.MenuItem("Stop", "Shift+F5", false, _runner.Running)) _runner.Stop();
             ImGui.EndMenu();
         }
@@ -244,7 +290,7 @@ sealed class EditorApp : IDisposable
         }
         else if (ImGui.Button("  Play  "))
         {
-            _runner.Play(_project);
+            Play();
         }
         ImGui.EndMainMenuBar();
 
@@ -252,7 +298,7 @@ sealed class EditorApp : IDisposable
             ImGui.OpenPopup("About Trinity");
         if (ImGui.BeginPopup("About Trinity"))
         {
-            ImGui.Text($"Trinity Editor {typeof(EditorApp).Assembly.GetName().Version?.ToString(3)}");
+            ImGui.Text($"Trinity Editor {typeof(EditorApp).Assembly.GetName().Version?.ToString(3) ?? ""}");
             ImGui.TextDisabled("Copyright 2026 blomst. PolyForm Noncommercial 1.0.0; commercial licences: github.com/blomstt/trinity");
             ImGui.Separator();
             ImGui.Text("Built with BRUTAL");
@@ -282,18 +328,30 @@ sealed class EditorApp : IDisposable
     void Shortcuts()
     {
         var io = ImGui.GetIO();
-        if (io.WantTextInput)
+        if (ImGui.IsKeyPressed(ImGuiKey.F5, false))
+        {
+            if (io.KeyShift) _runner.Stop();
+            else Play();
+        }
+        if (io.WantTextInput || _scripts.HasFocus)
             return;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.S)) SaveScene();
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.N)) NewScene();
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.Q)) _window.ShouldClose = true;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.D) && _selected != null) Duplicate();
         if (ImGui.IsKeyPressed(ImGuiKey.Delete) && _selected != null) Delete();
-        if (ImGui.IsKeyPressed(ImGuiKey.F5))
-        {
-            if (io.KeyShift) _runner.Stop();
-            else _runner.Play(_project);
-        }
+    }
+
+    /// <summary>Saves the scene and scripts, then runs the game, as Godot does.</summary>
+    void Play()
+    {
+        if (_runner.Running)
+            return;
+        if (_scene.Dirty)
+            SaveScene();
+        _scripts.SaveAll();
+        _scripts.Checker.ClearRuntime();
+        _runner.Play(_project);
     }
 
     // --- Panels --------------------------------------------------------------------------------------
@@ -302,6 +360,7 @@ sealed class EditorApp : IDisposable
     {
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new float2(0, 0));
         ImGui.Begin(ViewportPanel);
+        _viewportDock = ImGui.GetWindowDockID();
         var size = ImGui.GetContentRegionAvail();
         _viewportWidth = Math.Max(8, (int)size.X);
         _viewportHeight = Math.Max(8, (int)size.Y);
@@ -346,6 +405,11 @@ sealed class EditorApp : IDisposable
             ImGui.PushID(i);
             if (ImGui.Selectable(o.Name, o == _selected))
                 _selected = o;
+            if (!string.IsNullOrEmpty(o.Script))
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled(o.Script);
+            }
             if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
                 _view.Frame(o);
             if (ImGui.BeginPopupContextItem())
@@ -403,6 +467,8 @@ sealed class EditorApp : IDisposable
             _scene.Dirty = true;
         }
 
+        ScriptSection(o);
+
         if (_view.Model(o.Model) is { } model)
         {
             ImGui.SeparatorText("Animation");
@@ -449,6 +515,143 @@ sealed class EditorApp : IDisposable
                 ImGui.TextDisabled($"{model.Model.JointCount} bones, far version {model.Model.Lod1.IndexCount / 3:N0} triangles");
         }
         ImGui.End();
+    }
+
+    // --- Scripts in the Inspector ---------------------------------------------------------------------
+
+    static readonly float4 Warning = ImGuiHost.Color(0.95f, 0.72f, 0.33f);
+
+    void ScriptSection(Node o)
+    {
+        ImGui.SeparatorText("Script");
+        var current = o.Script ?? "";
+        if (ImGui.BeginCombo("Script", current.Length == 0 ? "None" : current))
+        {
+            if (ImGui.Selectable("None", current.Length == 0))
+                SetScript(o, null);
+            foreach (var s in _scripts.Index.All)
+                if (ImGui.Selectable(s.Name, s.Name == current))
+                    SetScript(o, s.Name);
+            ImGui.Separator();
+            if (ImGui.Selectable("New script..."))
+                _scripts.NewScript(ScriptPanel.Clean(o.Name), name => SetScript(o, name));
+            ImGui.EndCombo();
+        }
+        if (current.Length == 0)
+        {
+            ImGui.TextDisabled("Attach a script to give this object behaviour");
+            return;
+        }
+        if (_scripts.Index.Find(current) is not { } info)
+        {
+            ImGui.TextColored(Warning, $"No script class '{current}' in the project");
+            return;
+        }
+        if (ImGui.Button("Open script"))
+            _scripts.Open(info.File, info.Line);
+        foreach (var f in info.Fields)
+            ScriptField(o, f);
+        // Values saved for fields the script no longer has
+        foreach (var name in o.Fields?.Keys.Where(k => info.Fields.All(f => f.Name != k)).ToList() ?? [])
+        {
+            ImGui.TextColored(Warning, $"{name}: not in {current} any more");
+            ImGui.SameLine();
+            if (ImGui.SmallButton($"Remove##{name}"))
+            {
+                o.Fields!.Remove(name);
+                _scene.Dirty = true;
+            }
+        }
+    }
+
+    void SetScript(Node o, string? name)
+    {
+        if (o.Script == name)
+            return;
+        o.Script = name;
+        o.Fields = null;
+        _scene.Dirty = true;
+    }
+
+    /// <summary>One script field: the value saved in the scene, or the script's own default until it's changed.</summary>
+    void ScriptField(Node o, ScriptField f)
+    {
+        var saved = o.Fields != null && o.Fields.TryGetValue(f.Name, out var v) ? v : (JsonElement?)null;
+        var label = Words(f.Name);
+        var inv = CultureInfo.InvariantCulture;
+        string? json = null;
+        ImGui.PushID(f.Name);
+        switch (f.Type)
+        {
+            case "float" or "double":
+                var x = saved is { ValueKind: JsonValueKind.Number } n ? n.GetSingle() : Convert.ToSingle(f.Default, inv);
+                if (ImGui.DragFloat(label, ref x, 0.05f))
+                    json = x.ToString("R", inv);
+                break;
+            case "int":
+                var i = saved is { ValueKind: JsonValueKind.Number } k && k.TryGetInt32(out var ki) ? ki : (int)f.Default;
+                if (ImGui.DragInt(label, ref i))
+                    json = i.ToString(inv);
+                break;
+            case "bool":
+                var b = saved is { ValueKind: JsonValueKind.True or JsonValueKind.False } t ? t.GetBoolean() : (bool)f.Default;
+                if (ImGui.Checkbox(label, ref b))
+                    json = b ? "true" : "false";
+                break;
+            case "string":
+                var key = $"{o.GetHashCode()}/{f.Name}";
+                var text = saved is { ValueKind: JsonValueKind.String } st ? st.GetString() ?? "" : (string)f.Default;
+                if (!_stringFields.TryGetValue(key, out var edit))
+                {
+                    edit = new ImInputString(256);
+                    edit.SetValue(text.AsSpan());
+                    _stringFields[key] = edit;
+                }
+                if (ImGui.InputText(label, edit))
+                    json = "\"" + JsonEncodedText.Encode(edit.ToString()) + "\"";
+                break;
+            case "Vector3":
+                var d = (Vector3)f.Default;
+                var vec = saved is { ValueKind: JsonValueKind.Array } a && a.GetArrayLength() == 3
+                    ? new float3(a[0].GetSingle(), a[1].GetSingle(), a[2].GetSingle())
+                    : new float3(d.X, d.Y, d.Z);
+                if (ImGui.DragFloat3(label, ref vec, 0.05f))
+                    json = $"[{vec.X.ToString("R", inv)}, {vec.Y.ToString("R", inv)}, {vec.Z.ToString("R", inv)}]";
+                break;
+        }
+        if (json != null)
+        {
+            o.Fields ??= [];
+            o.Fields[f.Name] = JsonDocument.Parse(json).RootElement.Clone();
+            _scene.Dirty = true;
+        }
+        if (saved != null)
+        {
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Reset"))
+            {
+                o.Fields!.Remove(f.Name);
+                _stringFields.Remove($"{o.GetHashCode()}/{f.Name}");
+                _scene.Dirty = true;
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Back to the script's default");
+        }
+        ImGui.PopID();
+    }
+
+    /// <summary>"DegreesPerSecond" as "Degrees per second".</summary>
+    static string Words(string name)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < name.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(name[i]) && !char.IsUpper(name[i - 1]))
+                sb.Append(' ').Append(char.ToLowerInvariant(name[i]));
+            else
+                sb.Append(name[i]);
+        }
+        return sb.ToString();
     }
 
     void Assets()
@@ -526,7 +729,7 @@ sealed class EditorApp : IDisposable
         var name = Path.GetFileNameWithoutExtension(modelPath);
         var count = _scene.Objects.Count(o => o.Name.StartsWith(name));
         var model = _view.Model(modelPath);
-        var o = new SceneObject
+        var o = new Node
         {
             Name = count == 0 ? name : $"{name} {count + 1}",
             Model = modelPath,
@@ -543,17 +746,9 @@ sealed class EditorApp : IDisposable
     {
         if (_selected is not { } s)
             return;
-        var copy = new SceneObject
-        {
-            Name = s.Name + " copy",
-            Model = s.Model,
-            Position = s.Position + new Vector3(1, 0, 0),
-            Rotation = s.Rotation,
-            Scale = s.Scale,
-            Clip = s.Clip,
-            Speed = s.Speed,
-            Playing = s.Playing,
-        };
+        var copy = s.Clone();
+        copy.Name = s.Name + " copy";
+        copy.Position = s.Position + new Vector3(1, 0, 0);
         _scene.Objects.Add(copy);
         _scene.Dirty = true;
         _selected = copy;

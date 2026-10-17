@@ -25,10 +25,12 @@ Early. Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md). Decisions: [docs/adr/](docs/
 | `Trinity.Core` | Window (with fullscreen), input actions for keyboard, mouse and gamepad, player settings, `Jobs.For`, logging, required credits | E1 done |
 | `Trinity.Graphics` | Vulkan device and frame loop, GPU buffers, textures, SPIR-V shader loading, pipelines, cameras and frustums, video recording | First version |
 | `Trinity.Animation` | glTF skinned models (its own small `.glb`/`.gltf` reader), animation baked for GPU skinning | First version, from the battle prototype |
-| `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit | E1 done |
-| `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy, inspector, assets, log, stats, ▶ Play | First version |
+| `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit. `Trinity.Scenes`: scene files, C# scripts on nodes, `SceneRenderer`, `SceneGame` | E1 done; scenes and scripts first version |
+| `Trinity.Generators` | Build-time only: registers a game's scripts and their Inspector fields, so scripts need no reflection (NativeAOT) | First version |
+| `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy, inspector, assets, log, stats, a C# script editor, ▶ Play with hot reload | First version |
 | `samples/Battle` | Two armies fighting: the BRUTAL battle prototype rebuilt on Trinity. 64,000 skinned soldiers at about 190 fps | Runs |
-| `tests/Trinity.Tests` | Unit tests for the core | 19 passing |
+| `samples/Sandbox` | A scene made in the editor, brought to life by four small scripts: the scripting example | Runs |
+| `tests/Trinity.Tests` | Unit tests for the core, scenes and scripting | 24 passing |
 
 ## Shaders
 
@@ -62,25 +64,47 @@ dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor   
 A project is a folder with a `trinity.json`:
 
 ```json
-{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes" }
+{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }
 ```
 
 | Panel | What it does |
 |---|---|
 | Viewport | The scene, live: right-drag to orbit, middle-drag (or Shift + right-drag) to pan, wheel to zoom, **F** to frame the selection |
 | Hierarchy | Everything placed. Click to select, double-click to frame, right-click to duplicate or delete |
-| Inspector | Name, position, rotation, scale; for rigged models, the animation clip, play/pause, speed and restart |
+| Inspector | Name, position, rotation, scale; the attached script and its fields; for rigged models, the animation clip, play/pause, speed and restart |
 | Assets | The project's asset folder. Double-click a `.glb`/`.gltf` to place it in front of the camera |
 | Log | Engine, editor and game output, colour-coded |
 | Stats | Frame rate, GPU, objects and triangles, camera |
+| Script | The C# script editor (next to the Viewport): the project's scripts, files in tabs, errors marked in the code and listed underneath |
 
-- **Play** (or F5) builds and runs the game with `dotnet run`, its output in the Log; **Stop** (Shift+F5) ends it.
+- **Play** (or F5) saves, then builds and runs the game, its output in the Log; **Stop** (Shift+F5) ends it. With the ASP.NET Core runtime installed (Arch: `aspnet-runtime`, needed by `dotnet watch`), saving a script while the game runs applies the change to the running game (hot reload). Without it, saving restarts the game.
 - **Scenes** are saved as `Scenes/*.scene.json` (Ctrl+S; File > Save scene as, File > Open scene). If you close with unsaved changes, they're kept in `*.autosave.scene.json`.
 - **Shortcuts:** Ctrl+N new scene, Ctrl+D duplicate, Del delete, Ctrl+Q quit.
 - **Layout:** panels can be dragged and docked anywhere. The layout is remembered in `~/.config/trinity-editor/`.
 - **Models:** any rigged glTF with `…LOD0` meshes and animations plays its clips; anything else loads as a static model. Textures come with the renderer (E2), so models show base colours for now.
 
-Until scenes (E3) arrive, the editor's scene is a list of placed models. E3 replaces it with Trinity's own scene format, and the editor grows with each engine item: materials with E2, terrain painting with E5.
+Scenes are a list of placed models (nodes) until E3 brings hierarchy and components. The editor grows with each engine item: materials with E2, terrain painting with E5.
+
+### Scripts
+
+Like Godot: select an object, pick **Script > New script...** in the Inspector, and write its behaviour in C#:
+
+```csharp
+public sealed class Spin : Script
+{
+    public float DegreesPerSecond = 90; // public fields show in the Inspector, values saved per object
+
+    public override void Update(in FrameTime time) =>
+        Node.Rotation += new Vector3(0, DegreesPerSecond * time.Delta, 0);
+}
+```
+
+- `Ready()` runs once when the scene starts, `Update` every frame, `FixedUpdate` at 60 Hz. A script reaches its `Node` (position, rotation, scale, animation clip), the `Scene` (other nodes, the camera) and `Input`.
+- Inspector fields: public `float`, `double`, `int`, `bool`, `string` and `Vector3` fields. A value set in the Inspector is saved in the scene; **Reset** goes back to the script's default.
+- **Script editor:** C# colours, line numbers, undo/redo, Ctrl+F find (F3 next), Ctrl+/ comment, Tab/Shift+Tab indent, Alt+Up/Down move lines, auto-indent. Saving (Ctrl+S) checks the code with the compiler; errors are underlined where they are. A script that throws while the game runs is reported with its line, and pauses until its code changes, so the game keeps running.
+- Scripts are found at build time by `Trinity.Generators`, so games stay NativeAOT. A game in its own repository references it like the samples do (see `Directory.Build.targets`).
+- `./trinity-editor PROJECT --open Scripts/Spin.cs:12` opens a script at a line.
+- A game that's just its scenes is one line: `Engine.Run(new SceneGame("Scenes/main.scene.json"), options)` (see `samples/Sandbox`).
 
 ## Making a game
 

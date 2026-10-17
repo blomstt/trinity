@@ -1,0 +1,9 @@
+{
+  "Objects": [
+    { "Name": "Spinner", "Model": "Assets/soldier.glb", "Position": [-2.5, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "idle", "Speed": 1, "Playing": true, "Script": "Spin", "Fields": { "DegreesPerSecond": 60 } },
+    { "Name": "Patroller", "Model": "Assets/soldier.glb", "Position": [-2, 0, 2.5], "Rotation": [0, 90, 0], "Scale": 1, "Clip": "walk", "Speed": 1, "Playing": true, "Script": "Patrol" },
+    { "Name": "Floater", "Model": "Assets/soldier.glb", "Position": [2.5, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "idle", "Speed": 1, "Playing": true, "Script": "Bob", "Fields": { "Height": 0.4 } },
+    { "Name": "Guard", "Model": "Assets/soldier.glb", "Position": [0, 0, -1], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "attack", "Speed": 1, "Playing": true },
+    { "Name": "Camera", "Model": "", "Position": [0, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "", "Speed": 1, "Playing": false, "Script": "TurnTable" }
+  ]
+}

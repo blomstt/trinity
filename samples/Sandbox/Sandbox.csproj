@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Sandbox</AssemblyName>
+    <RootNamespace>Sandbox</RootNamespace>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Trinity/Trinity.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Assets/**;Scenes/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

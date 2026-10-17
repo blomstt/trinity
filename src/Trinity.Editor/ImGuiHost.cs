@@ -16,6 +16,9 @@ sealed unsafe class ImGuiHost : IDisposable
     readonly nint _iniPath;
     public readonly UiPass Pass;
 
+    /// <summary>A monospaced font, for the script editor.</summary>
+    public readonly ImFontPtr Mono;
+
     /// <summary>True the first time the editor runs (no saved layout yet).</summary>
     public readonly bool FirstRun;
 
@@ -35,6 +38,9 @@ sealed unsafe class ImGuiHost : IDisposable
         const string font = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
         if (File.Exists(font))
             io.Fonts.AddFontFromFileTTF(font, 17f);
+        // For code; ImGui's built-in font is monospaced too, if Noto Sans Mono isn't installed
+        const string mono = "/usr/share/fonts/noto/NotoSansMono-Regular.ttf";
+        Mono = File.Exists(mono) ? io.Fonts.AddFontFromFileTTF(mono, 16f) : io.Fonts.AddFontDefault();
         Theme();
 
         Pass = new UiPass(gpu);

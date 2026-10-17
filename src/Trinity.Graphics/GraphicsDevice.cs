@@ -169,7 +169,7 @@ public sealed unsafe class GraphicsDevice : IDisposable
         foreach (var gpu in Instance.PhysicalDevices)
         {
             var familyCount = gpu.GetQueueFamilyProperties_Count();
-            Span<VkQueueFamilyProperties> families = stackalloc VkQueueFamilyProperties[familyCount];
+            var families = new VkQueueFamilyProperties[familyCount]; // once per GPU at start-up
             gpu.GetQueueFamilyProperties_Write(families);
             for (var f = 0; f < familyCount; f++)
             {

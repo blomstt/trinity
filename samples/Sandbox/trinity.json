@@ -1,0 +1,7 @@
+{
+  "name": "Trinity sandbox",
+  "game": "Sandbox.csproj",
+  "assets": "Assets",
+  "scenes": "Scenes",
+  "scripts": "Scripts"
+}

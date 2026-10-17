@@ -5,7 +5,7 @@ namespace Trinity.Editor;
 
 /// <summary>
 /// A game the editor works on, described by a <c>trinity.json</c> at the game's root:
-/// <code>{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes" }</code>
+/// <code>{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }</code>
 /// Paths are relative to the file.
 /// </summary>
 sealed class EditorProject
@@ -15,10 +15,12 @@ sealed class EditorProject
     public string Game { get; set; } = "";
     public string Assets { get; set; } = "Assets";
     public string Scenes { get; set; } = "Scenes";
+    public string Scripts { get; set; } = "Scripts";
 
     public string Root { get; private set; } = "";
     public string AssetsPath => Path.Combine(Root, Assets);
     public string ScenesPath => Path.Combine(Root, Scenes);
+    public string ScriptsPath => Path.Combine(Root, Scripts);
     public string GamePath => Path.Combine(Root, Game);
 
     public static EditorProject Load(string pathOrFolder)

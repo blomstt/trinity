@@ -9,6 +9,13 @@
     <TrinityShader Include="Shaders/**/*.vert;Shaders/**/*.frag;Shaders/**/*.comp" />
   </ItemGroup>
 
+  <!-- Games get Trinity's build-time script registration (scripts and their Inspector fields, no reflection).
+       A game in its own repository adds this same reference to Trinity.Generators. -->
+  <ItemGroup Condition="'$(OutputType)' == 'Exe' and '$(IsTestProject)' != 'true' and '$(MSBuildProjectName)' != 'Trinity.Editor'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Trinity.Generators/Trinity.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
   <Target Name="TrinityCompileShaders"
           BeforeTargets="AssignTargetPaths"
           Condition="'@(TrinityShader)' != ''"

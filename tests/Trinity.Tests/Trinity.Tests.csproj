@@ -10,5 +10,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Trinity.Core/Trinity.Core.csproj" />
+    <ProjectReference Include="../../src/Trinity/Trinity.csproj" />
+    <ProjectReference Include="../../src/Trinity.Editor/Trinity.Editor.csproj" />
   </ItemGroup>
 </Project>

@@ -35,6 +35,7 @@ Microsoft.Extensions.* (logging, configuration, dependency injection, options, o
 ## Tools used at build time (not shipped)
 
 - `glslc` from shaderc (Apache-2.0) compiles shaders to SPIR-V.
+- Microsoft.CodeAnalysis (MIT, the C# compiler's API) runs `Trinity.Generators` inside the compiler.
 - Blender (GPL) runs `samples/Battle/tools/make_soldier.py`. Blender's licence doesn't apply to what it outputs.
 
 ## Sample content

@@ -12,4 +12,7 @@
     <PackageReference Include="Ahwoo.Brutal.ImGui" Version="$(BrutalVersion2)" />
     <PackageReference Include="Ahwoo.Brutal.ImGui.Backends" Version="$(BrutalVersion2)" />
   </ItemGroup>
-  </Project>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Trinity.Tests" />
+  </ItemGroup>
+</Project>
