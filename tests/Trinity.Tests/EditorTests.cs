@@ -305,3 +305,221 @@ public sealed class EditorTests : IDisposable
         Assert.Equal(200, steps);
     }
 }
+
+public sealed class ProjectTemplateTests : IDisposable
+{
+    readonly string _dir = Directory.CreateTempSubdirectory("trinity-template-").FullName;
+
+    public void Dispose() => Directory.Delete(_dir, recursive: true);
+
+    static string EngineRoot()
+    {
+        for (var d = AppContext.BaseDirectory; d != null; d = Path.GetDirectoryName(d.TrimEnd('/')))
+            if (ProjectTemplate.IsEngineRoot(d))
+                return d.TrimEnd('/');
+        throw new InvalidOperationException("tests run inside the Trinity repository");
+    }
+
+    [Fact]
+    public void A_new_project_has_its_files_a_valid_trinity_json_and_a_first_scene()
+    {
+        var folder = Path.Combine(_dir, ProjectTemplate.FolderName("My first game"));
+        Assert.EndsWith("MyFirstGame", folder);
+        ProjectTemplate.Create(folder, "My \"first\" game", EngineRoot());
+
+        var project = EditorProject.Load(folder);
+        Assert.Equal("My \"first\" game", project.Name);
+        Assert.True(File.Exists(project.GamePath));
+        Assert.NotNull(project.Engine);
+        foreach (var f in new[] { "Program.cs", "Directory.Build.props", "Directory.Build.targets", ".gitignore" })
+            Assert.True(File.Exists(Path.Combine(folder, f)), f);
+        Assert.Contains(EngineRoot(), File.ReadAllText(Path.Combine(folder, "Directory.Build.props")));
+
+        var (doc, problems) = new SceneLibrary(folder).Load("Scenes/main.scene.json");
+        Assert.True(problems.Ok, problems.ToString());
+        var world = new World();
+        new SceneLibrary(folder).Instantiate(world, doc!);
+        Assert.Contains(world.All(), e => world.Has<Camera3D>(e) && world.Get<Camera3D>(e).Current);
+        Assert.Contains(world.All(), e => world.Has<DirectionalLight>(e));
+    }
+
+    [Fact]
+    public void Editing_trinity_json_keeps_fields_it_doesnt_know()
+    {
+        File.WriteAllText(Path.Combine(_dir, "trinity.json"), """{ "name": "A", "game": "A.csproj", "custom": { "x": 1 } }""");
+        EditorProject.Edit(_dir, json => json["tags"] = new System.Text.Json.Nodes.JsonArray("rpg"));
+        var text = File.ReadAllText(Path.Combine(_dir, "trinity.json"));
+        Assert.Contains("custom", text);
+        Assert.Equal(["rpg"], EditorProject.Load(_dir).Tags);
+    }
+
+    [Theory]
+    [InlineData("My Game", "MyGame")]
+    [InlineData("  space-age_rts ", "SpaceAgeRts")]
+    [InlineData("3D test", "Game3DTest")]
+    [InlineData("!!!", "Game")]
+    public void Folder_names_are_valid_csharp_names(string name, string expected) => Assert.Equal(expected, ProjectTemplate.FolderName(name));
+}
+
+public sealed class ProjectFilesTests : IDisposable
+{
+    readonly string _dir = Directory.CreateTempSubdirectory("trinity-files-").FullName;
+    readonly SceneLibrary _library;
+
+    public ProjectFilesTests()
+    {
+        _library = new SceneLibrary(_dir);
+        Directory.CreateDirectory(Path.Combine(_dir, "Assets", "props"));
+        File.WriteAllText(Path.Combine(_dir, "Assets", "props", "rock.glb"), "not really a model");
+        var prefab = new World();
+        prefab.Add(prefab.Create("Rock"), new MeshRenderer("Assets/props/rock.glb"));
+        _library.Save("Scenes/rock.scene.json", SceneLibrary.Write(prefab));
+        var level = new World();
+        _library.Instance(level, "Scenes/rock.scene.json", EntityId.None, out _, "Big rock");
+        level.Add(level.Create("Loose rock"), new MeshRenderer("Assets/props/rock.glb"));
+        level.Create("Unrelated");
+        _library.Save("Scenes/level.scene.json", SceneLibrary.Write(level));
+        File.WriteAllText(Path.Combine(_dir, "Spawner.cs"), "class Spawner { string path = \"Scenes/rock.scene.json\"; }");
+    }
+
+    public void Dispose() => Directory.Delete(_dir, recursive: true);
+
+    static World Load(SceneLibrary library, string path)
+    {
+        library.Invalidate(path);
+        var (doc, problems) = library.Load(path);
+        Assert.True(problems.Ok, problems.ToString());
+        var w = new World();
+        problems = library.Instantiate(w, doc!);
+        Assert.True(problems.Ok, problems.ToString());
+        return w;
+    }
+
+    [Fact]
+    public void Finds_the_scenes_that_use_a_file()
+    {
+        Assert.Equal(["Scenes/level.scene.json", "Scenes/rock.scene.json"], ProjectFiles.ReferencesTo(_library, "Assets/props/rock.glb").Order());
+        Assert.Equal(["Scenes/level.scene.json"], ProjectFiles.ReferencesTo(_library, "Scenes/rock.scene.json"));
+        Assert.Equal(2, ProjectFiles.ReferencesTo(_library, "Assets").Count); // a folder: anything in it
+        Assert.Empty(ProjectFiles.ReferencesTo(_library, "Assets/other.glb"));
+    }
+
+    [Fact]
+    public void Renaming_a_model_updates_every_scene_that_uses_it()
+    {
+        var (scenes, _) = ProjectFiles.Move(_library, "Assets/props/rock.glb", "Assets/props/boulder.glb");
+        Assert.Equal(2, scenes.Count);
+        Assert.True(File.Exists(Path.Combine(_dir, "Assets/props/boulder.glb")));
+        var level = Load(_library, "Scenes/level.scene.json");
+        Assert.All(level.All().Where(level.Has<MeshRenderer>), e => Assert.Equal("Assets/props/boulder.glb", level.Get<MeshRenderer>(e).Mesh));
+    }
+
+    [Fact]
+    public void Moving_a_folder_updates_paths_inside_it_and_lists_scripts_that_mention_it()
+    {
+        var (scenes, scripts) = ProjectFiles.Move(_library, "Scenes", "Levels");
+        Assert.Contains("Levels/level.scene.json", scenes);
+        Assert.Equal(["Spawner.cs"], scripts); // named in code: listed for the person, not edited
+        var level = Load(_library, "Levels/level.scene.json");
+        var instance = level.All().Single(level.Has<SceneInstance>);
+        Assert.Equal("Levels/rock.scene.json", level.Get<SceneInstance>(instance).Source);
+        Assert.Equal(4, level.Count); // the instance still expands: Big rock > Rock, Loose rock, Unrelated
+    }
+
+    [Fact]
+    public void Moving_onto_an_existing_file_is_refused()
+    {
+        File.WriteAllText(Path.Combine(_dir, "Assets/props/boulder.glb"), "");
+        Assert.Throws<IOException>(() => ProjectFiles.Move(_library, "Assets/props/rock.glb", "Assets/props/boulder.glb"));
+        Assert.True(File.Exists(Path.Combine(_dir, "Assets/props/rock.glb")));
+    }
+
+    [Fact]
+    public void The_open_world_is_rewritten_in_memory_too()
+    {
+        var level = Load(_library, "Scenes/level.scene.json");
+        Assert.True(ProjectFiles.Rewrite(level, "Assets/props", "Assets/stone"));
+        Assert.Contains(level.All(), e => level.Has<MeshRenderer>(e) && level.Get<MeshRenderer>(e).Mesh == "Assets/stone/rock.glb");
+        Assert.False(ProjectFiles.Rewrite(level, "Assets/nothing", "Assets/else"));
+    }
+
+    [Fact]
+    public void Trash_moves_into_the_freedesktop_trash_with_an_info_file()
+    {
+        var data = Path.Combine(_dir, "data");
+        var before = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        Environment.SetEnvironmentVariable("XDG_DATA_HOME", data);
+        try
+        {
+            var file = Path.Combine(_dir, "Assets", "props", "rock.glb");
+            var first = ProjectFiles.Trash(file);
+            File.WriteAllText(file, "again");
+            var second = ProjectFiles.Trash(file);
+            Assert.False(File.Exists(file));
+            Assert.NotEqual(first, second); // same name trashed twice: kept apart
+            var info = File.ReadAllText(Path.Combine(data, "Trash", "info", Path.GetFileName(first) + ".trashinfo"));
+            Assert.Contains("[Trash Info]", info);
+            Assert.Contains("Path=" + file, info);
+            Assert.Equal("again", File.ReadAllText(second));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("XDG_DATA_HOME", before);
+        }
+    }
+}
+
+public sealed class EditorSceneExtraTests : IDisposable
+{
+    readonly string _dir = Directory.CreateTempSubdirectory("trinity-editor2-").FullName;
+
+    public void Dispose() => Directory.Delete(_dir, recursive: true);
+
+    [Fact]
+    public void Typed_nodes_are_one_undo_step_and_history_can_jump()
+    {
+        var s = EditorScene.New(new SceneLibrary(_dir), "Scenes/a.scene.json");
+        var cam = s.CreateNode("Camera", default, "Camera");
+        Assert.True(s.World.Has<Camera3D>(cam));
+        s.SetProperty(cam, "Position", SceneSchema.Vector(new Vector3(1, 2, 3)));
+        s.SetProperty(cam, "Name", SceneSchema.Text("Eye"));
+        Assert.Equal(["create Camera", "change Position", "change Name"], s.UndoSteps);
+        s.StepTo(1);
+        Assert.Equal("Camera", s.World.Name(s.World.All().Single()));
+        Assert.Equal(Vector3.Zero, s.World.Position(s.World.All().Single()));
+        Assert.Equal(["change Position", "change Name"], s.RedoSteps);
+        s.StepTo(3);
+        Assert.Equal("Eye", s.World.Name(s.World.All().Single()));
+        s.StepTo(0);
+        Assert.Equal(0, s.World.Count);
+    }
+
+    [Fact]
+    public void Placing_under_a_parent_keeps_the_world_position()
+    {
+        var s = EditorScene.New(new SceneLibrary(_dir), "Scenes/a.scene.json");
+        var parent = s.CreateNode("Parent");
+        s.SetProperty(parent, "Position", SceneSchema.Vector(new Vector3(10, 0, 0)));
+        var e = s.Place("Assets/a.glb", new Vector3(12, 0, 0), null, parent);
+        Assert.Equal(parent, s.World.Parent(e));
+        Assert.Equal(new Vector3(2, 0, 0), s.World.Position(e));
+        Assert.Equal(new Vector3(12, 0, 0), s.World.WorldPosition(e));
+    }
+
+    [Fact]
+    public void Lock_is_saved_and_undoable()
+    {
+        var library = new SceneLibrary(_dir);
+        var s = EditorScene.New(library, "Scenes/a.scene.json");
+        var e = s.CreateNode("Rock");
+        s.SetProperty(e, "Locked", SceneSchema.Bool(true));
+        s.Save();
+        var text = File.ReadAllText(Path.Combine(_dir, "Scenes/a.scene.json"));
+        Assert.Contains("\"Locked\": true", text);
+        Assert.DoesNotContain("\"Hidden\"", text); // defaults aren't written
+        var again = EditorScene.Load(library, "Scenes/a.scene.json", out _);
+        Assert.True(again.World.Locked(again.World.All().Single()));
+        s.Undo();
+        Assert.False(s.World.Locked(e));
+    }
+}

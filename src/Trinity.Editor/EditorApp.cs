@@ -14,8 +14,8 @@ namespace Trinity.Editor;
 /// <summary>Trinity Editor: one window with a viewport and docked panels, editing one project's scenes.</summary>
 sealed partial class EditorApp : IDisposable
 {
-    const string ViewportPanel = "Viewport", HierarchyPanel = "Hierarchy", InspectorPanel = "Inspector";
-    const string AssetsPanel = "Assets", LogPanel = "Log", StatsPanel = "Stats", EnvironmentPanel = "Environment";
+    const string ViewportPanel = "Viewport", HierarchyPanel = "Scene", InspectorPanel = "Inspector";
+    const string LogPanel = "Log", StatsPanel = "Stats", EnvironmentPanel = "Environment";
 
     readonly Window _window;
     readonly GraphicsDevice _gpu;
@@ -33,16 +33,22 @@ sealed partial class EditorApp : IDisposable
     ImTextureRef? _viewportTexture;
     int _viewportWidth = 1280, _viewportHeight = 720;
     bool _layoutBuilt;
-    bool _showHierarchy = true, _showInspector = true, _showAssets = true, _showLog = true, _showStats = true, _showEnvironment = true;
+    bool _showHierarchy = true, _showInspector = true, _showLog = true, _showStats = true, _showEnvironment = true;
     ImGuiID _inspectorDock;
     int _dragAxis = -1;
     readonly ImInputString _saveAsEdit = new(128);
     List<string> _assetFiles = [], _sceneFiles = [];
     double _assetsScanned = -10;
 
-    public EditorApp(EditorProject project)
+    readonly Settings _settings;
+
+    /// <summary>Set when the editor closed to go back to the Project Manager rather than to quit.</summary>
+    public bool BackToProjects { get; private set; }
+
+    public EditorApp(EditorProject project, Settings settings, bool splash = true)
     {
         _project = project;
+        _settings = settings;
         _window = new Window($"Trinity Editor - {project.Name}", 1600, 950, appId: "trinity-editor");
         _gpu = new GraphicsDevice(_window, vsync: true);
         _shaders = new ShaderLibrary(_gpu);
@@ -50,7 +56,7 @@ sealed partial class EditorApp : IDisposable
             Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
             "trinity-editor"
         );
-        _ui = new ImGuiHost(_window, _gpu, config);
+        _ui = new ImGuiHost(_window, _gpu, config, "editor-layout.ini");
         _scripts = new ScriptPanel(project, _ui.Mono);
         _runner.Output += _scripts.Checker.Feed;
         _scripts.Saved += () =>
@@ -59,12 +65,13 @@ sealed partial class EditorApp : IDisposable
                 _runner.Restart(_project);
         };
         // BRUTAL License 2.2: the logo before the editor's main function
-        if (Environment.GetEnvironmentVariable("TRINITY_SKIP_SPLASH") != "1")
+        if (splash && Environment.GetEnvironmentVariable("TRINITY_SKIP_SPLASH") != "1")
             Splash.Show(_window, _gpu, _shaders);
         _view = new SceneView(_gpu, _shaders, project);
         _view.AssetReady += Window.Wake;
 
         _library = new SceneLibrary(project.Root);
+        LoadFavorites();
         var main = SceneLibrary.Normalize(Path.Combine(project.Scenes, "main.scene.json"));
         _scene = File.Exists(project.Absolute(main)) ? LoadScene(main) : EditorScene.New(_library, main);
         UseSceneCamera();
@@ -103,9 +110,6 @@ sealed partial class EditorApp : IDisposable
 
     public void Run()
     {
-        using var capture = Screenshot != null
-            ? new GpuBuffer(_gpu, (long)_gpu.Extent.Width * _gpu.Extent.Height * 4 * 4, Brutal.VulkanApi.VkBufferUsageFlags.TransferDstBit, readback: true)
-            : null;
         var clock = Stopwatch.StartNew();
         var last = 0.0;
         double lastActivity = 0, lastFrame = 0;
@@ -146,10 +150,12 @@ sealed partial class EditorApp : IDisposable
             _view.Render(cmd, _scene, dt, now);
             _ui.Render(cmd);
             var shoot = Screenshot is { } shot && now >= shot.After;
-            _gpu.EndFrame(cmd, shoot ? capture : null, endRendering: false);
+            // Sized now, not at start: the window manager may have resized the window since
+            using var capture = shoot ? Screenshots.Buffer(_gpu) : null;
+            _gpu.EndFrame(cmd, capture, endRendering: false);
             if (shoot)
             {
-                SaveScreenshot(capture!, Screenshot!.Value.Path);
+                Screenshots.Save(_gpu, capture!, Screenshot!.Value.Path);
                 break;
             }
 
@@ -198,18 +204,6 @@ sealed partial class EditorApp : IDisposable
         Window.Wake();
     }
 
-    void SaveScreenshot(GpuBuffer pixels, string path)
-    {
-        _gpu.WaitIdle();
-        var e = _gpu.Extent;
-        var raw = path + ".bgra";
-        File.WriteAllBytes(raw, pixels.Bytes[..(e.Width * e.Height * 4)].ToArray());
-        var format = _gpu.ColorFormat is Brutal.VulkanApi.VkFormat.B8G8R8A8SRGB or Brutal.VulkanApi.VkFormat.B8G8R8A8UNorm ? "bgra" : "rgba";
-        Process.Start("magick", ["-size", $"{e.Width}x{e.Height}", "-depth", "8", $"{format}:{raw}", "-alpha", "off", path])!.WaitForExit();
-        File.Delete(raw);
-        Log.Info("editor", $"screenshot saved to {path}");
-    }
-
     // --- Layout and menus ---------------------------------------------------------------------------
 
     void DrawUi()
@@ -234,27 +228,36 @@ sealed partial class EditorApp : IDisposable
         _scripts.Draw(ImGui.GetTime(), _viewportDock);
         if (_showHierarchy) Hierarchy();
         if (_showInspector) Inspector();
-        if (_showAssets) Assets();
+        if (_showFileSystem) FileSystem();
+        if (_showHistory) History();
         if (_showLog) LogWindow();
         if (_showStats) Stats();
         if (_showEnvironment) EnvironmentWindow();
+        // Changes panels asked for while they were drawing (which can replace the nodes they show)
+        if (_afterTree is { } after)
+        {
+            _afterTree = null;
+            after();
+        }
         // Edits from one drag or one text entry are one undo step: it ends when nothing is being edited
         if (!ImGui.IsAnyItemActive() && _dragAxis < 0)
             _scene.CloseEdit();
     }
 
-    /// <summary>Hierarchy left, inspector and stats right, assets and log below, viewport in the middle.</summary>
+    /// <summary>Scene above FileSystem and History on the left, Inspector right, Log below, viewport in the middle.</summary>
     static void BuildDefaultLayout(ImGuiID dock)
     {
-        ImGui.Internal.DockBuilderSplitNode(dock, ImGuiDir.Left, 0.17f, out var left, out var rest);
-        ImGui.Internal.DockBuilderSplitNode(rest, ImGuiDir.Right, 0.24f, out var right, out var middle);
-        ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.28f, out var bottom, out var centre);
+        ImGui.Internal.DockBuilderSplitNode(dock, ImGuiDir.Left, 0.19f, out var left, out var rest);
+        ImGui.Internal.DockBuilderSplitNode(rest, ImGuiDir.Right, 0.25f, out var right, out var middle);
+        ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.24f, out var bottom, out var centre);
         ImGui.Internal.DockBuilderSplitNode(right, ImGuiDir.Down, 0.30f, out var rightBottom, out var rightTop);
-        ImGui.Internal.DockBuilderDockWindow(HierarchyPanel, left);
+        ImGui.Internal.DockBuilderSplitNode(left, ImGuiDir.Down, 0.5f, out var leftBottom, out var leftTop);
+        ImGui.Internal.DockBuilderDockWindow(HierarchyPanel, leftTop);
+        ImGui.Internal.DockBuilderDockWindow(HistoryPanel, leftBottom);
+        ImGui.Internal.DockBuilderDockWindow(FileSystemPanel, leftBottom);
         ImGui.Internal.DockBuilderDockWindow(EnvironmentPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(InspectorPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(StatsPanel, rightBottom);
-        ImGui.Internal.DockBuilderDockWindow(AssetsPanel, bottom);
         ImGui.Internal.DockBuilderDockWindow(LogPanel, bottom);
         ImGui.Internal.DockBuilderDockWindow(ScriptPanel.Title, centre);
         ImGui.Internal.DockBuilderDockWindow(ViewportPanel, centre);
@@ -283,6 +286,11 @@ sealed partial class EditorApp : IDisposable
             if (ImGui.MenuItem("Save scene", "Ctrl+S")) SaveScene();
             if (ImGui.MenuItem("Save scene as...")) openSaveAs = true;
             ImGui.Separator();
+            if (ImGui.MenuItem("Quit to Project List"))
+            {
+                BackToProjects = true;
+                _window.ShouldClose = true;
+            }
             if (ImGui.MenuItem("Quit", "Ctrl+Q")) _window.ShouldClose = true;
             ImGui.EndMenu();
         }
@@ -303,7 +311,8 @@ sealed partial class EditorApp : IDisposable
         {
             ImGui.MenuItem(HierarchyPanel, default, ref _showHierarchy);
             ImGui.MenuItem(InspectorPanel, default, ref _showInspector);
-            ImGui.MenuItem(AssetsPanel, default, ref _showAssets);
+            ImGui.MenuItem(FileSystemPanel, default, ref _showFileSystem);
+            ImGui.MenuItem(HistoryPanel, default, ref _showHistory);
             ImGui.MenuItem(LogPanel, default, ref _showLog);
             ImGui.MenuItem(StatsPanel, default, ref _showStats);
             ImGui.MenuItem(EnvironmentPanel, default, ref _showEnvironment);
@@ -429,6 +438,12 @@ sealed partial class EditorApp : IDisposable
         // pans, the wheel zooms; F frames the selection
         var io = ImGui.GetIO();
         var mouse = new Vector2(io.MousePos.X - origin.X, io.MousePos.Y - origin.Y);
+        // A model or scene dragged from FileSystem lands where the mouse points on the ground
+        if (ImGui.BeginDragDropTarget())
+        {
+            AcceptAssetDrop(EntityId.None, GroundUnder(mouse));
+            ImGui.EndDragDropTarget();
+        }
         MoveGizmo(mouse, ImGui.IsItemHovered());
         if (ImGui.IsItemHovered())
         {
@@ -490,7 +505,7 @@ sealed partial class EditorApp : IDisposable
             }
             return;
         }
-        _view.GizmoAxis = hovered && w.IsAlive(selected) ? HoveredAxis(w.WorldPosition(selected), mouse) : -1;
+        _view.GizmoAxis = hovered && w.IsAlive(selected) && !w.Locked(selected) ? HoveredAxis(w.WorldPosition(selected), mouse) : -1;
         if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
             if (_view.GizmoAxis >= 0)
@@ -506,6 +521,16 @@ sealed partial class EditorApp : IDisposable
                 _revealSelection = !picked.IsNone;
             }
         }
+    }
+
+    /// <summary>Where the ray through a viewport pixel meets the ground (y = 0), or the camera's target if it doesn't.</summary>
+    Vector3 GroundUnder(Vector2 pixel)
+    {
+        var (origin, direction) = _view.Ray(pixel);
+        if (direction.Y > -1e-4f)
+            return NewNodePosition();
+        var t = -origin.Y / direction.Y;
+        return t is > 0 and < 5000 ? origin + direction * t : NewNodePosition();
     }
 
     (Vector2?, Vector2?) GizmoAxisOnScreen(Vector3 at, int axis)
@@ -615,43 +640,6 @@ sealed partial class EditorApp : IDisposable
     static bool IsModel(string file) =>
         file.EndsWith(".glb", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase);
 
-    void Assets()
-    {
-        ImGui.Begin(AssetsPanel, ref _showAssets);
-        if (ImGui.Button("Refresh"))
-            _assetsScanned = -10;
-        ScanFiles();
-        ImGui.SameLine();
-        ImGui.TextDisabled("double-click a model to place it, a scene to instance it here; right-click a scene to open it");
-        ImGui.Separator();
-        ImGui.BeginChild("files");
-        foreach (var file in _sceneFiles)
-        {
-            ImGui.Selectable(file, file == _scene.Path);
-            if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
-                InstanceScene(file);
-            if (ImGui.BeginPopupContextItem(file))
-            {
-                if (ImGui.MenuItem("Open")) OpenScene(_project.Absolute(file));
-                if (ImGui.MenuItem("Instance here", default, false, file != _scene.Path)) InstanceScene(file);
-                ImGui.EndPopup();
-            }
-        }
-        foreach (var file in _assetFiles)
-        {
-            if (!IsModel(file))
-            {
-                ImGui.TextDisabled(file);
-                continue;
-            }
-            ImGui.Selectable(file);
-            if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
-                Place(file);
-        }
-        ImGui.EndChild();
-        ImGui.End();
-    }
-
     void LogWindow()
     {
         ImGui.Begin(LogPanel, ref _showLog);
@@ -699,22 +687,22 @@ sealed partial class EditorApp : IDisposable
 
     // --- Scene editing --------------------------------------------------------------------------------
 
-    void Place(string modelPath)
+    void Place(string modelPath, Vector3 position, EntityId parent)
     {
         var model = _view.Model(modelPath);
         var clip = model?.ClipNames.FirstOrDefault(c => c == "idle") ?? model?.ClipNames.FirstOrDefault();
-        var e = _scene.Place(modelPath, new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z), clip);
+        var e = _scene.Place(modelPath, position, clip, parent);
         Log.Info("editor", $"placed {_scene.World.Name(e)}");
     }
 
-    void InstanceScene(string scenePath)
+    void InstanceScene(string scenePath, Vector3 position, EntityId parent)
     {
         if (scenePath == _scene.Path)
         {
             Log.Warn("editor", "a scene can't contain itself");
             return;
         }
-        var e = _scene.InstantiateScene(scenePath, new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z), out var problems);
+        var e = _scene.InstantiateScene(scenePath, position, out var problems, parent);
         foreach (var error in problems.Errors)
             Log.Error("scene", error);
         foreach (var warning in problems.Warnings)

@@ -79,6 +79,7 @@ public static class SceneSchema
         new("Rotation", PropertyKind.Vector3, (w, e) => Vector(w.Rotation(e)), (w, e, v) => w.SetRotation(e, ReadVector(v))),
         new("Scale", PropertyKind.Vector3, (w, e) => Vector(w.Scale(e)), (w, e, v) => w.SetScale(e, ReadVector(v))),
         new("Hidden", PropertyKind.Bool, (w, e) => Bool(w.Hidden(e)), (w, e, v) => w.SetHidden(e, v.GetBoolean())),
+        new("Locked", PropertyKind.Bool, (w, e) => Bool(w.Locked(e)), (w, e, v) => w.SetLocked(e, v.GetBoolean())),
     ];
 
     static ComponentDef Def<T>(string name, params PropertyDef[] properties) where T : struct =>

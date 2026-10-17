@@ -1,14 +1,13 @@
 using Trinity;
 using Trinity.Editor;
 
-// Trinity Editor. Opens the project given (a folder with trinity.json, or the file itself),
-// otherwise the last project opened.
+// Trinity Editor. With a project (a folder with trinity.json, or the file itself) it opens that project;
+// without one it opens the Project Manager. File > Quit to Project List goes back to it.
 //
 //   trinity-editor [path/to/project] [--scene Scenes/x.scene.json] [--open Scripts/Spin.cs[:LINE]] [--select NODE]
 //                  [--screenshot out.png SECONDS]
 
 var settings = Settings.Load("trinity-editor");
-var recent = settings.Get("recent", EditorJson.Default.RecentProjects);
 (string, double)? screenshot = null;
 string? path = null, open = null, select = null, sceneFile = null;
 for (var a = 0; a < args.Length; a++)
@@ -17,33 +16,53 @@ for (var a = 0; a < args.Length; a++)
     else if (args[a] == "--select") select = args[++a];
     else if (args[a] == "--scene") sceneFile = args[++a];
     else path = args[a];
-path ??= recent.Last;
-if (path == null)
+
+EditorProject? project = null;
+if (path != null)
 {
-    Console.Error.WriteLine("Usage: trinity-editor <project folder or trinity.json>");
-    return 1;
+    try
+    {
+        project = EditorProject.Load(Path.GetFullPath(path));
+    }
+    catch (Exception e)
+    {
+        Console.Error.WriteLine(e.Message);
+        return 1;
+    }
 }
 
-EditorProject project;
-try
+// The BRUTAL logo shows once, in whichever window opens first
+var splash = true;
+var first = true;
+while (true)
 {
-    project = EditorProject.Load(Path.GetFullPath(path));
-}
-catch (Exception e)
-{
-    Console.Error.WriteLine(e.Message);
-    return 1;
-}
-recent.Last = project.Root;
-settings.Set("recent", recent, EditorJson.Default.RecentProjects);
-settings.Save();
+    if (project == null)
+    {
+        using var manager = new ProjectManager(settings, splash) { Screenshot = first ? screenshot : null };
+        splash = false;
+        project = manager.Run();
+        if (project == null || first && screenshot != null)
+            return 0;
+    }
+    ProjectManager.Opened(settings, project.Root);
 
-using var editor = new EditorApp(project) { Screenshot = screenshot };
-if (sceneFile != null)
-    editor.OpenScene(project.Absolute(sceneFile));
-if (open != null)
-    editor.OpenScript(open);
-if (select != null)
-    editor.Select(select);
-editor.Run();
-return 0;
+    bool back;
+    using (var editor = new EditorApp(project, settings, splash) { Screenshot = first ? screenshot : null })
+    {
+        if (first)
+        {
+            if (sceneFile != null)
+                editor.OpenScene(project.Absolute(sceneFile));
+            if (open != null)
+                editor.OpenScript(open);
+            if (select != null)
+                editor.Select(select);
+        }
+        editor.Run();
+        back = editor.BackToProjects;
+    }
+    splash = first = false;
+    if (!back)
+        return 0;
+    project = null;
+}

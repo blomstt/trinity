@@ -272,6 +272,18 @@ sealed partial class EditorApp
                     Report(_scene.SetProperty(e, path, SceneSchema.Text(f)));
             ImGui.EndCombo();
         });
+        // Drop a file from the FileSystem dock onto the field to use it
+        if (ImGui.BeginDragDropTarget())
+        {
+            if (!ImGui.AcceptDragDropPayload(AssetPayload).IsNull())
+            {
+                if (files.Contains(_draggedAsset))
+                    Report(_scene.SetProperty(e, path, SceneSchema.Text(_draggedAsset)));
+                else
+                    Log.Warn("editor", $"{_draggedAsset} can't be used for {label}");
+            }
+            ImGui.EndDragDropTarget();
+        }
         if (current.Length > 0 && !File.Exists(_project.Absolute(current)))
             ImGui.TextColored(Warning, $"Missing: {current}");
     }

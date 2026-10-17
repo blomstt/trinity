@@ -27,9 +27,9 @@ Early. Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md). Decisions: [docs/adr/](docs/
 | `Trinity.Rendering` | The renderer: HDR forward PBR, bindless materials and textures, procedural sky, cascaded shadows, fog, tone mapping, culling, debug lines | E2 done |
 | `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit. `Trinity.Scenes`: the entity `World`, components, hierarchy, scene files with nested instances, C# scripts on nodes, `SceneRenderer`, `SceneGame` | E1 and E3 done |
 | `Trinity.Generators` | Build-time only: registers a game's scripts and their Inspector fields, so scripts need no reflection (NativeAOT) | First version |
-| `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy tree, inspector, assets, log, stats, undo/redo, a C# script editor, ▶ Play with hot reload | First version |
+| `Trinity.Editor` | **Trinity Editor**: Project Manager, viewport, Scene, FileSystem, History and Inspector docks, log, stats, undo/redo, a C# script editor, ▶ Play with hot reload | First version |
 | `samples/Sandbox` | Scenes made in the editor with small scripts: scripting (`main`), a material test (`materials`), and a 5,000-character stress test with a day cycle (`crowd`) | Runs |
-| `tests/Trinity.Tests` | Unit tests for the core, entities, hierarchy, scene files, instances, the editor's scene model, scripting and per-frame allocations | 83 passing |
+| `tests/Trinity.Tests` | Unit tests for the core, entities, hierarchy, scene files, instances, the editor's scene model, scripting, glTF loading, input, project files and per-frame allocations | 113 passing |
 
 ## Renderer
 
@@ -82,7 +82,7 @@ The folder holds the executable, the few native libraries it loads, `Shaders/`, 
 ## Trinity Editor
 
 ```bash
-./trinity-editor samples/Sandbox     # or any folder with a trinity.json; with no argument it reopens the last project
+./trinity-editor samples/Sandbox     # or any folder with a trinity.json; with no argument it opens the Project Manager
 dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor   # the native editor, which ./trinity-editor then prefers
 # It's also in the app launcher (rofi) as "Trinity Editor", via ~/.local/share/applications/trinity-editor.desktop
 ```
@@ -93,12 +93,15 @@ A project is a folder with a `trinity.json`:
 { "name": "My game", "game": "src/MyGame/MyGame.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }
 ```
 
+With no project given, the editor opens the **Project Manager**: every project it knows, favourites pinned first, filtered by name, path or `tag:name`, sorted by last edited, name or path. **Create** makes a new project from a template (a game project referencing Trinity, `trinity.json`, a first scene with a camera and sun, `Assets/`, `Scenes/`, `Scripts/`) that builds and runs as is; **Import** adds a project folder; **Scan** finds every project under a folder. Each project can be opened (**Edit**, double-click or Enter), run without the editor, renamed, duplicated, tagged or removed from the list (its files stay), and **Remove Missing** drops projects whose folder is gone. Folders are picked with a built-in browser, so no file-dialog library ships. File > Quit to Project List goes back to it.
+
 | Panel | What it does |
 |---|---|
 | Viewport | The scene, live: right-drag to orbit, middle-drag (or Shift + right-drag) to pan, wheel to zoom, **F** to frame the selection |
-| Hierarchy | The node tree. Click to select (Ctrl+click for several), double-click to frame, drag onto a node to put it under it (with Shift: just before it) or onto empty space to move it to the top. Right-click to add a child, rename (F2), duplicate, delete, or open an instance's source scene. Instances show their source in blue; nodes from inside them are dimmed |
+| Scene | The node tree, with an icon for what each node is (mesh, character, camera, light, instance) and buttons on the right for its script (opens it), its source scene (for an instance), its lock and its visibility. **+** adds a node (empty, mesh, camera, light, scripted), the link button instances a scene, and the filter box finds nodes by name. Click to select (Ctrl+click for several), double-click to frame, drag onto a node to put it under it (with Shift: just before it) or onto empty space to move it to the top; drop a model or scene from FileSystem onto a node to add it there. Right-click to add a child, rename (F2), duplicate, delete, lock, hide, copy its path, or open an instance's source. Nodes from inside an instance are dimmed. Locked nodes can't be picked or moved in the viewport |
 | Inspector | Name, hidden, position, rotation, scale and every component's properties, with pickers for models, clips and nodes. Add or remove components. On a node from an instance, changed properties are highlighted as overrides with a **Reset** to the source's value; an instance lists its overrides with **Revert** and **Reload** |
-| Assets | The project's scenes and assets. Double-click a `.glb`/`.gltf` to place it in front of the camera, a scene to add an instance of it; right-click a scene to open it |
+| FileSystem | The project's folders and files, with favourites at the top, back and forward, a path bar (type a path and press Enter), a filter and a sort order. Double-click a scene or script to open it, a model to place it. Drag a model or scene into the viewport (it lands where the mouse points on the ground), onto a node, or onto an asset field in the Inspector; drag anything onto a folder to move it. Right-click for new folders, scenes and scripts, rename, duplicate, favourites, copy path, show in the file manager, and move to trash. **Moving or renaming a file updates every scene that refers to it**; deleting lists the scenes that use it first, and goes to the desktop trash, so it can be restored |
+| History | The undo steps, oldest first. Click one to go back (or forward) to it |
 | Log | Engine, editor and game output, colour-coded |
 | Stats | Frame rate, GPU, objects and triangles, camera |
 | Script | The C# script editor (next to the Viewport): the project's scripts, files in tabs, errors marked in the code and listed underneath |
@@ -107,7 +110,7 @@ A project is a folder with a `trinity.json`:
 - **Scenes** are saved as `Scenes/*.scene.json` (Ctrl+S; File > Save scene as, File > Open scene). Unsaved changes are written to `*.autosave.scene.json` every two minutes, when switching scenes and on quit; the scene file itself only changes when you save.
 - **Undo:** every edit can be undone (Ctrl+Z) and redone (Ctrl+Y or Ctrl+Shift+Z): property changes, gizmo drags (one step per drag), creating, deleting, duplicating, moving in the tree, components, overrides and the environment. Edit shows what the next undo does.
 - **Shortcuts:** Ctrl+N new scene, Ctrl+Shift+N new node, Ctrl+D duplicate, Del delete, F2 rename, Ctrl+Q quit.
-- **Layout:** panels can be dragged and docked anywhere. The layout is remembered in `~/.config/trinity-editor/`.
+- **Layout:** Scene above FileSystem and History on the left, Inspector on the right. Panels can be dragged and docked anywhere; the layout is remembered in `~/.config/trinity-editor/`. Icons are drawn as shapes, not loaded from files.
 - **Models:** any rigged glTF with `…LOD0` meshes and animations plays its clips; anything else loads as a static model. Textures come with the renderer (E2), so models show base colours for now.
 
 The editor grows with each engine item: terrain painting with E5, physics shapes with E6.

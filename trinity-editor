@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Starts Trinity Editor. Pass a project folder, or it opens the last one.
+# Starts Trinity Editor. Pass a project folder, or it opens the Project Manager.
 #   ./trinity-editor samples/Sandbox
 # Runs the native (NativeAOT) editor if it was published after the last change under src/:
 #   dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor
-# Otherwise runs the JIT build, building it only when there's none yet; after changing the editor,
-# run: dotnet build src/Trinity.Editor -c Release (or publish again)
+# Otherwise runs the JIT build, rebuilding it first if the source changed since it was built.
 here="$(dirname "$(readlink -f "$0")")"
 native="$here/artifacts/editor/trinity-editor"
 dll="$here/src/Trinity.Editor/bin/Release/net10.0/trinity-editor.dll"
@@ -13,8 +12,14 @@ for a in "$@"; do
     # Project paths are made absolute; options pass through
     if [[ "$a" != --* && -e "$a" ]]; then args+=("$(readlink -f "$a")"); else args+=("$a"); fi
 done
-if [[ -x "$native" && -z "$(find "$here/src" -path '*/bin' -prune -o -path '*/obj' -prune -o -type f -newer "$native" -print -quit)" ]]; then
+# Whether anything under src/ (not build output) changed after the given file
+changed_since() { [[ -n "$(find "$here/src" -path '*/bin' -prune -o -path '*/obj' -prune -o -type f -newer "$1" -print -quit)" ]]; }
+if [[ -x "$native" ]] && ! changed_since "$native"; then
     exec "$native" "${args[@]}" 2> >(grep -v 'radv is not a conformant' >&2)
 fi
-[[ -f "$dll" ]] || dotnet build "$here/src/Trinity.Editor" -c Release -nologo -v q >/dev/null || { echo "Build failed" >&2; exit 1; }
+# The JIT build, rebuilt when the source changed since it was built (never run a stale editor)
+if [[ ! -f "$dll" ]] || changed_since "$dll"; then
+    dotnet build "$here/src/Trinity.Editor" -c Release -nologo -v q >/dev/null || { echo "Build failed" >&2; exit 1; }
+    touch "$dll" # up to date even when the change was elsewhere and nothing was rebuilt
+fi
 exec dotnet "$dll" "${args[@]}" 2> >(grep -v 'radv is not a conformant' >&2)

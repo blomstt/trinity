@@ -93,7 +93,7 @@ sealed class SceneView : IDisposable
         _view.GridHalfSize = MathF.Max(60f, Camera.Distance * 6f);
         foreach (var e in scene.Selection)
             DrawBounds(scene.World, e);
-        if (scene.World.IsAlive(scene.Primary))
+        if (scene.World.IsAlive(scene.Primary) && !scene.World.Locked(scene.Primary))
             DrawGizmo(scene.World.WorldPosition(scene.Primary));
         _scene.Render(cmd, _view, scene.World, ViewCamera, RenderOutput.To(Output), time, scene.Selection, Camera.Target);
     }
@@ -150,7 +150,7 @@ sealed class SceneView : IDisposable
         {
             var e = renderers.Entities[i];
             var transform = world.WorldMatrix(e);
-            if (world.HiddenInHierarchy(e) || Model(renderers.Components[i].Mesh) is not { } m || !Matrix4x4.Invert(transform, out var inv))
+            if (world.HiddenInHierarchy(e) || world.Locked(e) || Model(renderers.Components[i].Mesh) is not { } m || !Matrix4x4.Invert(transform, out var inv))
                 continue;
             var origin = Vector3.Transform(ray.Origin, inv);
             var dir = Vector3.TransformNormal(ray.Direction, inv);

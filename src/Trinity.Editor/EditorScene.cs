@@ -155,6 +155,28 @@ sealed class EditorScene
 
     string? _lastSnapshot;
 
+    /// <summary>The steps that can be undone, oldest first (for the History panel).</summary>
+    public IEnumerable<string> UndoSteps => _undo.Select(e => e.Label);
+
+    /// <summary>The steps that can be redone, next first.</summary>
+    public IEnumerable<string> RedoSteps => Enumerable.Reverse(_redo).Select(e => e.Label);
+
+    /// <summary>Undoes or redoes until <paramref name="done"/> steps are applied (0: as opened).</summary>
+    public void StepTo(int done)
+    {
+        while (_undo.Count > done && Undo()) { }
+        while (_undo.Count < done && Redo()) { }
+    }
+
+    /// <summary>Forgets every undo and redo step (after a change undo can't follow, such as moving files).</summary>
+    public void ClearHistory()
+    {
+        _undo.Clear();
+        _redo.Clear();
+        _open = null;
+        _lastSnapshot = null;
+    }
+
     /// <summary>Ends a drag: the next edit starts a new undo step even if it's to the same property.</summary>
     public void CloseEdit() => _open = null;
 
@@ -341,22 +363,32 @@ sealed class EditorScene
         _open = merge ? edit : null;
     }
 
-    public EntityId CreateNode(string name, EntityId parent = default) =>
+    /// <summary>A new node under <paramref name="parent"/>, optionally with a component ("Camera", say), as one undo step.</summary>
+    public EntityId CreateNode(string name, EntityId parent = default, string? component = null) =>
         Structural($"create {name}", () =>
         {
-            if (!parent.IsNone && IsInherited(parent))
-                parent = World.Get<Inherited>(parent).InstanceRoot; // new nodes can't go inside an instance's contents
-            var e = World.Create(UniqueName(name), parent);
+            var e = World.Create(UniqueName(name), Attachable(parent));
+            if (component != null)
+                SceneSchema.Component(component)?.Add(World, e);
             Select(e);
             return e;
         });
 
-    /// <summary>A node drawing a model, playing its idle clip if it has one.</summary>
-    public EntityId Place(string model, Vector3 position, string? clip) =>
+    /// <summary>Where new nodes can go: not inside an instance's contents, so under the instance itself.</summary>
+    EntityId Attachable(EntityId parent) =>
+        !parent.IsNone && World.IsAlive(parent) && IsInherited(parent) ? World.Get<Inherited>(parent).InstanceRoot : parent;
+
+    /// <summary>A world position as a local one under <paramref name="parent"/>.</summary>
+    Vector3 LocalPosition(EntityId parent, Vector3 world) =>
+        !parent.IsNone && Matrix4x4.Invert(World.WorldMatrix(parent), out var inverse) ? Vector3.Transform(world, inverse) : world;
+
+    /// <summary>A node drawing a model at a world position, playing its idle clip if it has one.</summary>
+    public EntityId Place(string model, Vector3 position, string? clip, EntityId parent = default) =>
         Structural($"place {System.IO.Path.GetFileNameWithoutExtension(model)}", () =>
         {
-            var e = World.Create(UniqueName(System.IO.Path.GetFileNameWithoutExtension(model)));
-            World.SetPosition(e, position);
+            parent = Attachable(parent);
+            var e = World.Create(UniqueName(System.IO.Path.GetFileNameWithoutExtension(model)), parent);
+            World.SetPosition(e, LocalPosition(parent, position));
             World.Add(e, new MeshRenderer(model));
             if (!string.IsNullOrEmpty(clip))
                 World.Add(e, new Animator(clip));
@@ -364,15 +396,16 @@ sealed class EditorScene
             return e;
         });
 
-    /// <summary>An instance of another scene (a prefab), as a new node.</summary>
-    public EntityId InstantiateScene(string scenePath, Vector3 position, out SceneProblems problems)
+    /// <summary>An instance of another scene (a prefab) at a world position, as a new node.</summary>
+    public EntityId InstantiateScene(string scenePath, Vector3 position, out SceneProblems problems, EntityId parent = default)
     {
         SceneProblems found = new();
         var e = Structural($"instance {System.IO.Path.GetFileName(scenePath)}", () =>
         {
+            parent = Attachable(parent);
             var name = UniqueName(System.IO.Path.GetFileName(scenePath).Replace(".scene.json", ""));
-            var node = Library.Instance(World, scenePath, EntityId.None, out found, name);
-            World.SetPosition(node, position);
+            var node = Library.Instance(World, scenePath, parent, out found, name);
+            World.SetPosition(node, LocalPosition(parent, position));
             Select(node);
             return node;
         });

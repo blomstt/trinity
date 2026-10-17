@@ -266,6 +266,7 @@ public sealed class SceneLibrary(string root)
             w.SetRotation(e, r.Rotation);
             w.SetScale(e, r.Scale);
             w.SetHidden(e, r.Hidden);
+            w.SetLocked(e, r.Locked);
             if (inherited)
                 w.Add(e, new Inherited { InstanceRoot = owner, SourcePath = key[ownerKey.Length..] });
             foreach (var (component, props) in r.Components ?? [])
@@ -374,6 +375,7 @@ public sealed class SceneLibrary(string root)
             Rotation = w.Rotation(e),
             Scale = w.Scale(e),
             Hidden = w.Hidden(e),
+            Locked = w.Locked(e),
         };
         foreach (var def in SceneSchema.Components)
         {

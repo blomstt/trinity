@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Trinity.Scenes;
 
@@ -35,7 +36,11 @@ public sealed class NodeRecord
     public Vector3 Position { get; set; }
     public Vector3 Rotation { get; set; }
     public Vector3 Scale { get; set; } = Vector3.One;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Hidden { get; set; }
+    /// <summary>Editor only: can't be picked or moved in the viewport.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Locked { get; set; }
 
     /// <summary>Component name to property values, as <see cref="SceneSchema"/> names them.</summary>
     public Dictionary<string, Dictionary<string, JsonElement>>? Components { get; set; }
