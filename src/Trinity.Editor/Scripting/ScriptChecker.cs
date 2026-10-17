@@ -65,6 +65,7 @@ sealed partial class ScriptChecker
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        ProjectTemplate.UseEngine(start);
         Status = "checking...";
         var process = Process.Start(start);
         if (process == null)

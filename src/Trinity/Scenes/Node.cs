@@ -90,17 +90,31 @@ public readonly struct Node(World world, EntityId id) : IEquatable<Node>
         return None;
     }
 
-    /// <summary>A descendant by a path of child names, "House/Front door"; <see cref="None"/> if there isn't one.</summary>
-    public Node Find(string path)
+    /// <summary>
+    /// A descendant by a path of child names, "House/Front door"; <see cref="None"/> if there isn't one.
+    /// Names may contain "/" themselves ("Door 1/2" is found as a child called that).
+    /// </summary>
+    public Node Find(string path) => FindIn(World, World.Children(Id), path.Trim('/'));
+
+    /// <summary>
+    /// Matches a path against nodes' names rather than splitting it at every "/": a node whose whole name
+    /// is the path wins, otherwise a node whose name is a prefix of it (up to a "/") is searched for the rest.
+    /// </summary>
+    internal static Node FindIn(World world, World.ChildList candidates, string path)
     {
-        var node = this;
-        foreach (var part in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        if (path.Length == 0)
+            return None;
+        foreach (var c in candidates)
+            if (world.Name(c) == path)
+                return new Node(world, c);
+        foreach (var c in candidates)
         {
-            node = node.Child(part);
-            if (!node.IsValid)
-                return None;
+            var name = world.Name(c);
+            if (path.Length > name.Length + 1 && path[name.Length] == '/' && path.StartsWith(name, StringComparison.Ordinal)
+                && FindIn(world, world.Children(c), path[(name.Length + 1)..]) is { IsValid: true } found)
+                return found;
         }
-        return node;
+        return None;
     }
 
     public Node AddChild(string name = "Node") => new(World, World.Create(name, Id));
@@ -211,6 +225,7 @@ public sealed class Vector3Converter : JsonConverter<Vector3>
 
     public override void Write(Utf8JsonWriter writer, Vector3 value, JsonSerializerOptions options)
     {
+        value = SceneSchema.Finite(value); // JSON can't hold NaN or infinity
         writer.WriteStartArray();
         writer.WriteNumberValue(value.X);
         writer.WriteNumberValue(value.Y);

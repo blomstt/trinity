@@ -129,7 +129,7 @@ public sealed class World
 
     Vector3[] _position = new Vector3[64], _rotation = new Vector3[64], _scale = new Vector3[64];
     Matrix4x4[] _world = new Matrix4x4[64];
-    bool[] _dirty = new bool[64], _hidden = new bool[64];
+    bool[] _dirty = new bool[64], _hidden = new bool[64], _locked = new bool[64];
     uint[] _version = new uint[64];
     string[] _name = new string[64];
     long[] _persistent = new long[64];
@@ -174,6 +174,7 @@ public sealed class World
         _world[i] = Matrix4x4.Identity;
         _dirty[i] = true;
         _hidden[i] = false;
+        _locked[i] = false;
         _name[i] = name;
         _persistent[i] = persistentId != 0 ? persistentId : NextPersistentId++;
         if (persistentId >= NextPersistentId)
@@ -199,6 +200,7 @@ public sealed class World
         Array.Resize(ref _world, n);
         Array.Resize(ref _dirty, n);
         Array.Resize(ref _hidden, n);
+        Array.Resize(ref _locked, n);
         Array.Resize(ref _version, n);
         Array.Resize(ref _name, n);
         Array.Resize(ref _persistent, n);
@@ -296,6 +298,10 @@ public sealed class World
     public bool Hidden(EntityId e) => _hidden[Index(e)];
     public void SetHidden(EntityId e, bool hidden) => _hidden[Index(e)] = hidden;
 
+    /// <summary>Locked nodes can't be picked or moved in the editor's viewport; the game ignores it.</summary>
+    public bool Locked(EntityId e) => _locked[Index(e)];
+    public void SetLocked(EntityId e, bool locked) => _locked[Index(e)] = locked;
+
     /// <summary>Whether the entity or any ancestor is hidden.</summary>
     public bool HiddenInHierarchy(EntityId e)
     {
@@ -358,12 +364,9 @@ public sealed class World
         Matrix4x4 world = keepWorld ? WorldMatrix(child) : default;
         Unlink(i);
         Link(i, parent.IsNone ? NoIndex : Index(parent), index);
-        if (keepWorld)
-        {
-            var parentWorld = parent.IsNone ? Matrix4x4.Identity : WorldMatrix(parent);
-            Matrix4x4.Invert(parentWorld, out var inv);
+        // A parent scaled to nothing can't be undone (no inverse): the child keeps its local transform then
+        if (keepWorld && Matrix4x4.Invert(parent.IsNone ? Matrix4x4.Identity : WorldMatrix(parent), out var inv))
             SetLocalMatrix(child, world * inv);
-        }
         MarkDirty(i);
     }
 
@@ -503,7 +506,8 @@ public sealed class World
     /// <summary>Sets the local transform from a matrix (scale, rotation, translation; skew is lost).</summary>
     public void SetLocalMatrix(EntityId e, Matrix4x4 m)
     {
-        if (!Matrix4x4.Decompose(m, out var scale, out var q, out var translation))
+        if (!Matrix4x4.Decompose(m, out var scale, out var q, out var translation)
+            || !float.IsFinite(translation.X + translation.Y + translation.Z + scale.X + scale.Y + scale.Z + q.X + q.Y + q.Z + q.W))
             return;
         var i = Index(e);
         _position[i] = translation;

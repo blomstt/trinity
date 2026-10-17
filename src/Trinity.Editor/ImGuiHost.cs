@@ -22,7 +22,7 @@ sealed unsafe class ImGuiHost : IDisposable
     /// <summary>True the first time the editor runs (no saved layout yet).</summary>
     public readonly bool FirstRun;
 
-    public ImGuiHost(Window window, GraphicsDevice gpu, string configDir)
+    public ImGuiHost(Window window, GraphicsDevice gpu, string configDir, string layoutFile)
     {
         ImGui.CreateContext();
         var io = ImGui.GetIO();
@@ -30,7 +30,7 @@ sealed unsafe class ImGuiHost : IDisposable
 
         // Panel layout is remembered between runs
         Directory.CreateDirectory(configDir);
-        var ini = Path.Combine(configDir, "layout.ini");
+        var ini = Path.Combine(configDir, layoutFile);
         FirstRun = !File.Exists(ini);
         _iniPath = Marshal.StringToCoTaskMemUTF8(ini);
         io.IniFilename = (byte*)_iniPath;

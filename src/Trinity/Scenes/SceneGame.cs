@@ -15,6 +15,12 @@ namespace Trinity.Scenes;
 /// </summary>
 public class SceneGame(string scenePath) : Game
 {
+    /// <summary>
+    /// When set (to a scene file's path), the game starts with that scene instead of its own first one:
+    /// how the editor's "Play this scene" runs the scene being edited, without the game parsing arguments.
+    /// </summary>
+    public const string SceneVariable = "TRINITY_SCENE";
+
     public Scene Scene { get; private set; } = null!;
     public SceneRenderer Renderer { get; private set; } = null!;
     RenderView _view = null!;
@@ -24,7 +30,7 @@ public class SceneGame(string scenePath) : Game
 
     public override void Load()
     {
-        Scene = Scene.Load(Engine, scenePath);
+        Scene = Scene.Load(Engine, Environment.GetEnvironmentVariable(SceneVariable) is { Length: > 0 } chosen ? chosen : scenePath);
         Renderer = new SceneRenderer(Gpu, Shaders, Scene.Root);
         _view = Renderer.Renderer.CreateView(Gpu.Extent.Width, Gpu.Extent.Height);
         Renderer.LoadAll(Scene.World);

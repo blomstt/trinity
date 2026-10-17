@@ -17,6 +17,8 @@ public sealed class SceneRenderer : IDisposable
     readonly string _root;
     readonly Dictionary<string, Mesh?> _meshes = [];
     readonly Dictionary<string, Task<SkinnedModel>> _loading = [];
+    readonly AssetStamps _stamps = new();
+    long _checked = Environment.TickCount64;
 
     /// <summary>Raised on a worker thread when a model or texture is ready to finish loading (wake an idle loop).</summary>
     public event Action? AssetReady;
@@ -51,6 +53,7 @@ public sealed class SceneRenderer : IDisposable
         if (!_loading.TryGetValue(relativePath, out var task))
         {
             var path = Path.GetFullPath(Path.Combine(_root, relativePath));
+            _stamps.Track(relativePath, path);
             _loading[relativePath] = task = Task.Run(() => new SkinnedModel(path));
             task.ContinueWith(_ => AssetReady?.Invoke());
             return null;
@@ -83,6 +86,7 @@ public sealed class SceneRenderer : IDisposable
     public void Render(CommandBuffer cmd, RenderView view, World world, in Camera camera, RenderOutput output, double time,
         IReadOnlySet<EntityId>? highlighted = null, Vector3 gridCentre = default)
     {
+        ReloadChanged();
         _draws.Clear();
         highlighted ??= _noHighlight;
         Collect(world, _collected);
@@ -154,6 +158,27 @@ public sealed class SceneRenderer : IDisposable
         if (!world.Has<MeshRenderer>(e) || Model(world.Get<MeshRenderer>(e).Mesh) is not { } mesh || mesh.Model.Vertices.Length == 0)
             return (m.Translation, 2f * scale);
         return (Vector3.Transform((mesh.BoundsMin + mesh.BoundsMax) / 2, m), (mesh.BoundsMax - mesh.BoundsMin).Length() * scale);
+    }
+
+    /// <summary>
+    /// About once a second: models whose files changed since they were loaded (re-exported, fixed, or
+    /// added after failing) are dropped, so the next draw loads them again.
+    /// </summary>
+    void ReloadChanged()
+    {
+        if (Environment.TickCount64 - _checked < 1000)
+            return;
+        _checked = Environment.TickCount64;
+        foreach (var path in _stamps.Changed(p => Path.Combine(_root, p)))
+        {
+            if (_loading.ContainsKey(path))
+                continue; // still loading the old version: looked at again once it's in
+            _stamps.Forget(path); // tracked again when it reloads
+            if (!_meshes.Remove(path, out var old))
+                continue;
+            old?.Dispose(); // released once no frame in flight still draws it
+            Log.Info("scene", $"{path} changed on disk: reloading");
+        }
     }
 
     public void Dispose()

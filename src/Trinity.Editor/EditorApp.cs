@@ -14,8 +14,8 @@ namespace Trinity.Editor;
 /// <summary>Trinity Editor: one window with a viewport and docked panels, editing one project's scenes.</summary>
 sealed partial class EditorApp : IDisposable
 {
-    const string ViewportPanel = "Viewport", HierarchyPanel = "Hierarchy", InspectorPanel = "Inspector";
-    const string AssetsPanel = "Assets", LogPanel = "Log", StatsPanel = "Stats", EnvironmentPanel = "Environment";
+    const string ViewportPanel = "Viewport", HierarchyPanel = "Scene", InspectorPanel = "Inspector";
+    const string LogPanel = "Log", StatsPanel = "Stats", EnvironmentPanel = "Environment";
 
     readonly Window _window;
     readonly GraphicsDevice _gpu;
@@ -33,16 +33,22 @@ sealed partial class EditorApp : IDisposable
     ImTextureRef? _viewportTexture;
     int _viewportWidth = 1280, _viewportHeight = 720;
     bool _layoutBuilt;
-    bool _showHierarchy = true, _showInspector = true, _showAssets = true, _showLog = true, _showStats = true, _showEnvironment = true;
+    bool _showHierarchy = true, _showInspector = true, _showLog = true, _showStats = true, _showEnvironment = true;
     ImGuiID _inspectorDock;
     int _dragAxis = -1;
     readonly ImInputString _saveAsEdit = new(128);
     List<string> _assetFiles = [], _sceneFiles = [];
     double _assetsScanned = -10;
 
-    public EditorApp(EditorProject project)
+    readonly Settings _settings;
+
+    /// <summary>Set when the editor closed to go back to the Project Manager rather than to quit.</summary>
+    public bool BackToProjects { get; private set; }
+
+    public EditorApp(EditorProject project, Settings settings, bool splash = true)
     {
         _project = project;
+        _settings = settings;
         _window = new Window($"Trinity Editor - {project.Name}", 1600, 950, appId: "trinity-editor");
         _gpu = new GraphicsDevice(_window, vsync: true);
         _shaders = new ShaderLibrary(_gpu);
@@ -50,7 +56,7 @@ sealed partial class EditorApp : IDisposable
             Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
             "trinity-editor"
         );
-        _ui = new ImGuiHost(_window, _gpu, config);
+        _ui = new ImGuiHost(_window, _gpu, config, "editor-layout.ini");
         _scripts = new ScriptPanel(project, _ui.Mono);
         _runner.Output += _scripts.Checker.Feed;
         _scripts.Saved += () =>
@@ -59,14 +65,16 @@ sealed partial class EditorApp : IDisposable
                 _runner.Restart(_project);
         };
         // BRUTAL License 2.2: the logo before the editor's main function
-        if (Environment.GetEnvironmentVariable("TRINITY_SKIP_SPLASH") != "1")
+        if (splash && Environment.GetEnvironmentVariable("TRINITY_SKIP_SPLASH") != "1")
             Splash.Show(_window, _gpu, _shaders);
         _view = new SceneView(_gpu, _shaders, project);
         _view.AssetReady += Window.Wake;
 
         _library = new SceneLibrary(project.Root);
+        LoadFavorites();
         var main = SceneLibrary.Normalize(Path.Combine(project.Scenes, "main.scene.json"));
         _scene = File.Exists(project.Absolute(main)) ? LoadScene(main) : EditorScene.New(_library, main);
+        OfferAutosave(main);
         UseSceneCamera();
         Log.Info("editor", $"project {project.Name} at {project.Root}, scene {_scene.Path}");
     }
@@ -103,16 +111,41 @@ sealed partial class EditorApp : IDisposable
 
     public void Run()
     {
-        using var capture = Screenshot != null
-            ? new GpuBuffer(_gpu, (long)_gpu.Extent.Width * _gpu.Extent.Height * 4 * 4, Brutal.VulkanApi.VkBufferUsageFlags.TransferDstBit, readback: true)
-            : null;
         var clock = Stopwatch.StartNew();
         var last = 0.0;
         double lastActivity = 0, lastFrame = 0;
-        _window.Activity += () => lastActivity = clock.Elapsed.TotalSeconds;
         Log.Written += WakeOnLog;
-        while (!_window.ShouldClose)
+        try
         {
+            Loop(clock, lastActivity, lastFrame, last);
+        }
+        finally
+        {
+            // Also when something threw: unsaved work is written beside the scene before the editor goes
+            Log.Written -= WakeOnLog;
+            _scripts.KeepUnsaved();
+            if (_scene.Dirty)
+                Log.Warn("editor", $"unsaved changes kept in {Autosave(0)}");
+        }
+    }
+
+    void Loop(Stopwatch clock, double lastActivity, double lastFrame, double last)
+    {
+        _window.Activity += () => lastActivity = clock.Elapsed.TotalSeconds;
+        while (true)
+        {
+            // Closing the window with unsaved changes asks first (Save, Don't save, Cancel)
+            if (_window.ShouldClose)
+            {
+                if (!_scene.Dirty || _closing || Screenshot != null)
+                    break;
+                _window.ShouldClose = false;
+                RequestLeave(() =>
+                {
+                    _closing = true;
+                    _window.ShouldClose = true;
+                });
+            }
             // Draw only when something changed: input in the last half second, playing animations, a
             // new log line, or a once-a-second refresh for the stats. Otherwise don't draw at all:
             // on Wayland each presented frame wakes the event wait again, so waiting isn't enough.
@@ -146,10 +179,12 @@ sealed partial class EditorApp : IDisposable
             _view.Render(cmd, _scene, dt, now);
             _ui.Render(cmd);
             var shoot = Screenshot is { } shot && now >= shot.After;
-            _gpu.EndFrame(cmd, shoot ? capture : null, endRendering: false);
+            // Sized now, not at start: the window manager may have resized the window since
+            using var capture = shoot ? Screenshots.Buffer(_gpu) : null;
+            _gpu.EndFrame(cmd, capture, endRendering: false);
             if (shoot)
             {
-                SaveScreenshot(capture!, Screenshot!.Value.Path);
+                Screenshots.Save(_gpu, capture!, Screenshot!.Value.Path);
                 break;
             }
 
@@ -157,29 +192,24 @@ sealed partial class EditorApp : IDisposable
             if (_scene.Dirty && now - _autosaved > 120)
                 Autosave(now);
         }
-
-        Log.Written -= WakeOnLog;
-        _scripts.KeepUnsaved();
-        if (_scene.Dirty)
-            Log.Warn("editor", $"unsaved changes kept in {Autosave(0)}");
     }
 
     double _autosaved;
+    bool _closing;
 
     /// <summary>Writes unsaved changes beside the scene (not over it), every couple of minutes and on quit.</summary>
     string Autosave(double now)
     {
         _autosaved = now;
-        var backup = _scene.Path.Replace(".scene.json", ".autosave.scene.json");
         try
         {
-            _library.Save(backup, _scene.ToDocument());
+            _scene.Autosave();
         }
         catch (Exception e)
         {
             Log.Error("editor", $"autosave failed: {e.Message}");
         }
-        return backup;
+        return _scene.AutosavePath;
     }
 
     bool Animating()
@@ -196,18 +226,6 @@ sealed partial class EditorApp : IDisposable
     {
         _logChanged = true;
         Window.Wake();
-    }
-
-    void SaveScreenshot(GpuBuffer pixels, string path)
-    {
-        _gpu.WaitIdle();
-        var e = _gpu.Extent;
-        var raw = path + ".bgra";
-        File.WriteAllBytes(raw, pixels.Bytes[..(e.Width * e.Height * 4)].ToArray());
-        var format = _gpu.ColorFormat is Brutal.VulkanApi.VkFormat.B8G8R8A8SRGB or Brutal.VulkanApi.VkFormat.B8G8R8A8UNorm ? "bgra" : "rgba";
-        Process.Start("magick", ["-size", $"{e.Width}x{e.Height}", "-depth", "8", $"{format}:{raw}", "-alpha", "off", path])!.WaitForExit();
-        File.Delete(raw);
-        Log.Info("editor", $"screenshot saved to {path}");
     }
 
     // --- Layout and menus ---------------------------------------------------------------------------
@@ -234,27 +252,37 @@ sealed partial class EditorApp : IDisposable
         _scripts.Draw(ImGui.GetTime(), _viewportDock);
         if (_showHierarchy) Hierarchy();
         if (_showInspector) Inspector();
-        if (_showAssets) Assets();
+        if (_showFileSystem) FileSystem();
+        if (_showHistory) History();
         if (_showLog) LogWindow();
         if (_showStats) Stats();
         if (_showEnvironment) EnvironmentWindow();
+        // Changes panels asked for while they were drawing (which can replace the nodes they show)
+        if (_afterTree is { } after)
+        {
+            _afterTree = null;
+            Safely(after);
+        }
+        SceneDialogs();
         // Edits from one drag or one text entry are one undo step: it ends when nothing is being edited
         if (!ImGui.IsAnyItemActive() && _dragAxis < 0)
             _scene.CloseEdit();
     }
 
-    /// <summary>Hierarchy left, inspector and stats right, assets and log below, viewport in the middle.</summary>
+    /// <summary>Scene above FileSystem and History on the left, Inspector right, Log below, viewport in the middle.</summary>
     static void BuildDefaultLayout(ImGuiID dock)
     {
-        ImGui.Internal.DockBuilderSplitNode(dock, ImGuiDir.Left, 0.17f, out var left, out var rest);
-        ImGui.Internal.DockBuilderSplitNode(rest, ImGuiDir.Right, 0.24f, out var right, out var middle);
-        ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.28f, out var bottom, out var centre);
+        ImGui.Internal.DockBuilderSplitNode(dock, ImGuiDir.Left, 0.19f, out var left, out var rest);
+        ImGui.Internal.DockBuilderSplitNode(rest, ImGuiDir.Right, 0.25f, out var right, out var middle);
+        ImGui.Internal.DockBuilderSplitNode(middle, ImGuiDir.Down, 0.24f, out var bottom, out var centre);
         ImGui.Internal.DockBuilderSplitNode(right, ImGuiDir.Down, 0.30f, out var rightBottom, out var rightTop);
-        ImGui.Internal.DockBuilderDockWindow(HierarchyPanel, left);
+        ImGui.Internal.DockBuilderSplitNode(left, ImGuiDir.Down, 0.5f, out var leftBottom, out var leftTop);
+        ImGui.Internal.DockBuilderDockWindow(HierarchyPanel, leftTop);
+        ImGui.Internal.DockBuilderDockWindow(HistoryPanel, leftBottom);
+        ImGui.Internal.DockBuilderDockWindow(FileSystemPanel, leftBottom);
         ImGui.Internal.DockBuilderDockWindow(EnvironmentPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(InspectorPanel, rightTop);
         ImGui.Internal.DockBuilderDockWindow(StatsPanel, rightBottom);
-        ImGui.Internal.DockBuilderDockWindow(AssetsPanel, bottom);
         ImGui.Internal.DockBuilderDockWindow(LogPanel, bottom);
         ImGui.Internal.DockBuilderDockWindow(ScriptPanel.Title, centre);
         ImGui.Internal.DockBuilderDockWindow(ViewportPanel, centre);
@@ -283,6 +311,13 @@ sealed partial class EditorApp : IDisposable
             if (ImGui.MenuItem("Save scene", "Ctrl+S")) SaveScene();
             if (ImGui.MenuItem("Save scene as...")) openSaveAs = true;
             ImGui.Separator();
+            if (ImGui.MenuItem("Quit to Project List"))
+                RequestLeave(() =>
+                {
+                    BackToProjects = true;
+                    _closing = true;
+                    _window.ShouldClose = true;
+                });
             if (ImGui.MenuItem("Quit", "Ctrl+Q")) _window.ShouldClose = true;
             ImGui.EndMenu();
         }
@@ -303,7 +338,8 @@ sealed partial class EditorApp : IDisposable
         {
             ImGui.MenuItem(HierarchyPanel, default, ref _showHierarchy);
             ImGui.MenuItem(InspectorPanel, default, ref _showInspector);
-            ImGui.MenuItem(AssetsPanel, default, ref _showAssets);
+            ImGui.MenuItem(FileSystemPanel, default, ref _showFileSystem);
+            ImGui.MenuItem(HistoryPanel, default, ref _showHistory);
             ImGui.MenuItem(LogPanel, default, ref _showLog);
             ImGui.MenuItem(StatsPanel, default, ref _showStats);
             ImGui.MenuItem(EnvironmentPanel, default, ref _showEnvironment);
@@ -326,21 +362,30 @@ sealed partial class EditorApp : IDisposable
         if (ImGui.BeginMenu("Run"))
         {
             if (ImGui.MenuItem("Play", "F5", false, !_runner.Running)) Play();
+            if (ImGui.MenuItem("Play this scene", "F6", false, !_runner.Running)) Play(thisScene: true);
             if (ImGui.MenuItem("Stop", "Shift+F5", false, _runner.Running)) _runner.Stop();
             ImGui.EndMenu();
         }
 
-        // Play / Stop in the middle of the bar
-        ImGui.SetCursorPosX(ImGui.GetWindowWidth() / 2 - 60);
+        // Play, Play this scene and Stop in the middle of the bar
+        ImGui.SetCursorPosX(ImGui.GetWindowWidth() / 2 - 100);
         if (_runner.Running)
         {
             if (ImGui.Button("  Stop  ")) _runner.Stop();
             ImGui.SameLine();
             ImGui.TextColored(ImGuiHost.Color(0.88f, 0.66f, 0.36f), "running");
         }
-        else if (ImGui.Button("  Play  "))
+        else
         {
-            Play();
+            if (ImGui.Button("  Play  "))
+                Play();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Run the game from its first scene (F5)");
+            ImGui.SameLine();
+            if (ImGui.Button("Play this scene"))
+                Play(thisScene: true);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip($"Run the game from {_scene.Path} (F6)");
         }
         ImGui.EndMainMenuBar();
 
@@ -366,9 +411,14 @@ sealed partial class EditorApp : IDisposable
         {
             ImGui.Text("Scene name");
             var enter = ImGui.InputText("##name", _saveAsEdit, ImGuiInputTextFlags.EnterReturnsTrue);
-            if ((ImGui.Button("Save") || enter) && !_saveAsEdit.IsEmpty)
+            var target = SceneLibrary.Normalize(Path.Combine(_project.Scenes, _saveAsEdit.ToString().Trim() + ".scene.json"));
+            // Saving over another scene says so, and takes a deliberate click (Enter doesn't do it)
+            var overwrite = target != _scene.Path && File.Exists(_project.Absolute(target));
+            if (overwrite)
+                ImGui.TextColored(Warning, $"{target} exists: saving replaces it");
+            if ((ImGui.Button(overwrite ? "Replace" : "Save") || enter && !overwrite) && !_saveAsEdit.IsEmpty)
             {
-                SaveScene(SceneLibrary.Normalize(Path.Combine(_project.Scenes, _saveAsEdit.ToString() + ".scene.json")));
+                SaveScene(target);
                 ImGui.CloseCurrentPopup();
             }
             ImGui.EndPopup();
@@ -383,6 +433,8 @@ sealed partial class EditorApp : IDisposable
             if (io.KeyShift) _runner.Stop();
             else Play();
         }
+        if (ImGui.IsKeyPressed(ImGuiKey.F6, false))
+            Play(thisScene: true);
         if (io.WantTextInput || _scripts.HasFocus)
             return;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.S)) SaveScene();
@@ -397,15 +449,21 @@ sealed partial class EditorApp : IDisposable
     }
 
     /// <summary>Saves the scene and scripts, then runs the game.</summary>
-    void Play()
+    /// <summary>Saves, then runs the game from its own first scene (F5), or from the scene being edited (F6).</summary>
+    void Play(bool thisScene = false)
     {
         if (_runner.Running)
             return;
         if (_scene.Dirty)
             SaveScene();
+        if (thisScene && !File.Exists(_project.Absolute(_scene.Path)))
+        {
+            Log.Warn("play", "save the scene first, so the game can load it");
+            return;
+        }
         _scripts.SaveAll();
         _scripts.Checker.ClearRuntime();
-        _runner.Play(_project);
+        _runner.Play(_project, thisScene ? _project.Absolute(_scene.Path) : null);
     }
 
     // --- Panels --------------------------------------------------------------------------------------
@@ -429,6 +487,12 @@ sealed partial class EditorApp : IDisposable
         // pans, the wheel zooms; F frames the selection
         var io = ImGui.GetIO();
         var mouse = new Vector2(io.MousePos.X - origin.X, io.MousePos.Y - origin.Y);
+        // A model or scene dragged from FileSystem lands where the mouse points on the ground
+        if (ImGui.BeginDragDropTarget())
+        {
+            AcceptAssetDrop(EntityId.None, GroundUnder(mouse));
+            ImGui.EndDragDropTarget();
+        }
         MoveGizmo(mouse, ImGui.IsItemHovered());
         if (ImGui.IsItemHovered())
         {
@@ -490,7 +554,7 @@ sealed partial class EditorApp : IDisposable
             }
             return;
         }
-        _view.GizmoAxis = hovered && w.IsAlive(selected) ? HoveredAxis(w.WorldPosition(selected), mouse) : -1;
+        _view.GizmoAxis = hovered && w.IsAlive(selected) && !w.Locked(selected) ? HoveredAxis(w.WorldPosition(selected), mouse) : -1;
         if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
             if (_view.GizmoAxis >= 0)
@@ -506,6 +570,16 @@ sealed partial class EditorApp : IDisposable
                 _revealSelection = !picked.IsNone;
             }
         }
+    }
+
+    /// <summary>Where the ray through a viewport pixel meets the ground (y = 0), or the camera's target if it doesn't.</summary>
+    Vector3 GroundUnder(Vector2 pixel)
+    {
+        var (origin, direction) = _view.Ray(pixel);
+        if (direction.Y > -1e-4f)
+            return NewNodePosition();
+        var t = -origin.Y / direction.Y;
+        return t is > 0 and < 5000 ? origin + direction * t : NewNodePosition();
     }
 
     (Vector2?, Vector2?) GizmoAxisOnScreen(Vector3 at, int axis)
@@ -615,43 +689,6 @@ sealed partial class EditorApp : IDisposable
     static bool IsModel(string file) =>
         file.EndsWith(".glb", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".gltf", StringComparison.OrdinalIgnoreCase);
 
-    void Assets()
-    {
-        ImGui.Begin(AssetsPanel, ref _showAssets);
-        if (ImGui.Button("Refresh"))
-            _assetsScanned = -10;
-        ScanFiles();
-        ImGui.SameLine();
-        ImGui.TextDisabled("double-click a model to place it, a scene to instance it here; right-click a scene to open it");
-        ImGui.Separator();
-        ImGui.BeginChild("files");
-        foreach (var file in _sceneFiles)
-        {
-            ImGui.Selectable(file, file == _scene.Path);
-            if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
-                InstanceScene(file);
-            if (ImGui.BeginPopupContextItem(file))
-            {
-                if (ImGui.MenuItem("Open")) OpenScene(_project.Absolute(file));
-                if (ImGui.MenuItem("Instance here", default, false, file != _scene.Path)) InstanceScene(file);
-                ImGui.EndPopup();
-            }
-        }
-        foreach (var file in _assetFiles)
-        {
-            if (!IsModel(file))
-            {
-                ImGui.TextDisabled(file);
-                continue;
-            }
-            ImGui.Selectable(file);
-            if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
-                Place(file);
-        }
-        ImGui.EndChild();
-        ImGui.End();
-    }
-
     void LogWindow()
     {
         ImGui.Begin(LogPanel, ref _showLog);
@@ -699,22 +736,22 @@ sealed partial class EditorApp : IDisposable
 
     // --- Scene editing --------------------------------------------------------------------------------
 
-    void Place(string modelPath)
+    void Place(string modelPath, Vector3 position, EntityId parent)
     {
         var model = _view.Model(modelPath);
         var clip = model?.ClipNames.FirstOrDefault(c => c == "idle") ?? model?.ClipNames.FirstOrDefault();
-        var e = _scene.Place(modelPath, new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z), clip);
+        var e = _scene.Place(modelPath, position, clip, parent);
         Log.Info("editor", $"placed {_scene.World.Name(e)}");
     }
 
-    void InstanceScene(string scenePath)
+    void InstanceScene(string scenePath, Vector3 position, EntityId parent)
     {
         if (scenePath == _scene.Path)
         {
             Log.Warn("editor", "a scene can't contain itself");
             return;
         }
-        var e = _scene.InstantiateScene(scenePath, new Vector3(_view.Camera.Target.X, 0, _view.Camera.Target.Z), out var problems);
+        var e = _scene.InstantiateScene(scenePath, position, out var problems, parent);
         foreach (var error in problems.Errors)
             Log.Error("scene", error);
         foreach (var warning in problems.Warnings)
@@ -745,27 +782,140 @@ sealed partial class EditorApp : IDisposable
         return scene;
     }
 
-    void NewScene()
+    void NewScene() => RequestLeave(() => _scene = EditorScene.New(_library, UntitledPath(_project.Root, _project.Scenes)));
+
+    /// <summary>A scene path not taken yet: Scenes/untitled.scene.json, then "untitled 2" and so on, so a new scene never saves over another.</summary>
+    public static string UntitledPath(string root, string scenesFolder)
     {
-        KeepUnsaved();
-        _scene = EditorScene.New(_library, SceneLibrary.Normalize(Path.Combine(_project.Scenes, "untitled.scene.json")));
+        for (var i = 1; ; i++)
+        {
+            var path = SceneLibrary.Normalize(Path.Combine(scenesFolder, i == 1 ? "untitled.scene.json" : $"untitled {i}.scene.json"));
+            if (!File.Exists(Path.Combine(root, path)) && !File.Exists(Path.Combine(root, EditorScene.AutosaveOf(path))))
+                return path;
+        }
     }
 
-    /// <summary>Opens a scene file (an absolute path, or relative to the project).</summary>
-    public void OpenScene(string path)
+    /// <summary>Opens a scene file (an absolute path, or relative to the project), asking first if the open one has unsaved changes.</summary>
+    public void OpenScene(string path) => RequestLeave(() =>
     {
-        KeepUnsaved();
         // A fresh library, so scenes changed outside the editor are read again
         _library = new SceneLibrary(_project.Root);
-        _scene = LoadScene(SceneLibrary.Normalize(_project.Relative(_project.Absolute(path))));
+        var relative = SceneLibrary.Normalize(_project.Relative(_project.Absolute(path)));
+        _scene = LoadScene(relative);
+        OfferAutosave(relative);
         UseSceneCamera();
         Log.Info("editor", $"opened {_scene.Path}");
+    });
+
+    // --- Unsaved changes ------------------------------------------------------------------------------
+
+    Action? _leave;      // what to do once the unsaved changes are dealt with
+    bool _askLeave, _askRestore;
+
+    /// <summary>Runs <paramref name="next"/> (which closes or replaces the scene) now, or after asking about unsaved changes.</summary>
+    void RequestLeave(Action next)
+    {
+        if (!_scene.Dirty)
+        {
+            next();
+            return;
+        }
+        _leave = next;
+        _askLeave = true;
     }
 
-    void KeepUnsaved()
+    /// <summary>After opening a scene: if it has an autosave newer than the file, offer to bring those changes back.</summary>
+    void OfferAutosave(string path) => _askRestore = EditorScene.HasNewerAutosave(_library, path);
+
+    void SceneDialogs()
     {
-        if (_scene.Dirty)
-            Log.Warn("editor", $"unsaved changes to {_scene.Path} kept in {Autosave(ImGui.GetTime())}");
+        if (_askLeave)
+        {
+            ImGui.OpenPopup("unsaved-changes");
+            _askLeave = false;
+        }
+        if (_askRestore)
+        {
+            // Only for the scene open now (another may have been opened since this was asked)
+            if (EditorScene.HasNewerAutosave(_library, _scene.Path))
+                ImGui.OpenPopup("restore-autosave");
+            _askRestore = false;
+        }
+        var centre = ImGui.GetMainViewport().GetCenter();
+        ImGui.SetNextWindowPos(centre, ImGuiCond.Appearing, new float2(0.5f, 0.5f));
+        if (ImGui.BeginPopupModal("unsaved-changes", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
+        {
+            ImGui.Text($"Save changes to {_scene.Path} first?");
+            ImGui.TextDisabled("Not saving discards them.");
+            Action? next = null;
+            if (ImGui.Button("Save", new float2(110, 0)))
+            {
+                SaveScene();
+                if (!_scene.Dirty)
+                    next = _leave; // a failed save keeps the scene open
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Don't save", new float2(110, 0)))
+            {
+                Safely(_scene.DiscardAutosave);
+                _scene.Dirty = false;
+                next = _leave;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new float2(110, 0)) || ImGui.IsKeyPressed(ImGuiKey.Escape))
+                ImGui.CloseCurrentPopup();
+            ImGui.EndPopup();
+            if (!ImGui.IsPopupOpen("unsaved-changes"))
+                _leave = null;
+            if (next != null)
+                Safely(next);
+        }
+        ImGui.SetNextWindowPos(centre, ImGuiCond.Appearing, new float2(0.5f, 0.5f));
+        if (ImGui.BeginPopupModal("restore-autosave", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
+        {
+            var when = File.GetLastWriteTime(_project.Absolute(_scene.AutosavePath));
+            ImGui.Text($"{_scene.Path} has unsaved changes from {when:yyyy-MM-dd HH:mm}.");
+            ImGui.TextDisabled("They were kept when the editor closed without saving them.");
+            if (ImGui.Button("Restore them", new float2(140, 0)))
+            {
+                var path = _scene.Path;
+                var restored = EditorScene.LoadAutosave(_library, path, out var problems);
+                foreach (var e in problems.Errors)
+                    Log.Error("scene", e);
+                if (problems.Ok)
+                {
+                    _scene = restored;
+                    UseSceneCamera();
+                    Log.Info("editor", $"restored unsaved changes to {path}: save to keep them");
+                }
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Discard them", new float2(140, 0)))
+            {
+                Safely(_scene.DiscardAutosave);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    /// <summary>
+    /// Runs an editor action, reporting what goes wrong instead of letting it close the editor (and
+    /// lose unsaved work) with it.
+    /// </summary>
+    static void Safely(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception e)
+        {
+            Log.Error("editor", $"{e.GetType().Name}: {e.Message}");
+        }
     }
 
     void SaveScene(string? path = null)
