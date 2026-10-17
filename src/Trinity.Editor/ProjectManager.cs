@@ -444,11 +444,14 @@ sealed class ProjectManager : IDisposable
             return;
         }
         Log.Info("projects", $"running {project.Name}");
-        Process.Start(new ProcessStartInfo("dotnet", ["run", "--project", project.GamePath])
+        ProjectTemplate.CheckEngine(project.Root);
+        var start = new ProcessStartInfo("dotnet", ["run", "--project", project.GamePath])
         {
             WorkingDirectory = project.Root,
             UseShellExecute = false,
-        })?.Dispose();
+        };
+        ProjectTemplate.UseEngine(start);
+        Process.Start(start)?.Dispose();
     }
 
     string DefaultLocation()
@@ -772,6 +775,7 @@ sealed class ProjectManager : IDisposable
         if (ImGui.Button("Save", new float2(110, 0)))
         {
             Remember("engine", Path.GetFullPath(_locationEdit.ToString()));
+            ProjectTemplate.Current = ProjectTemplate.EngineRoot(_settings);
             return true;
         }
         ImGui.EndDisabled();
@@ -938,14 +942,7 @@ static class ProjectTemplate
             }
             """);
         // Trinity's build settings and targets (shaders, script registration, licences) come from the engine's folder
-        Write(folder, "Directory.Build.props", $"""
-            <Project>
-              <PropertyGroup>
-                <TrinityRoot>{engine}/</TrinityRoot>
-              </PropertyGroup>
-              <Import Project="$(TrinityRoot)Directory.Build.props" />
-            </Project>
-            """);
+        Write(folder, "Directory.Build.props", EngineProps(engine));
         Write(folder, "Directory.Build.targets", """
             <Project>
               <Import Project="$(TrinityRoot)Directory.Build.targets" />
@@ -986,6 +983,72 @@ static class ProjectTemplate
         world.SetRotation(sun, new System.Numerics.Vector3(-50, 40, 0));
         world.Add(sun, new DirectionalLight());
         new SceneLibrary(folder).Save("Scenes/main.scene.json", SceneLibrary.Write(world, new SceneEnvironment()));
+    }
+
+    /// <summary>
+    /// The project's Directory.Build.props: where Trinity is. TRINITY_ROOT, which the editor sets for the
+    /// builds it starts, wins over the path written here, so a project builds against the editor's own
+    /// Trinity even if the written path is out of date; the editor also rewrites a path that no longer
+    /// leads to Trinity (<see cref="RepairEngine"/>).
+    /// </summary>
+    static string EngineProps(string engine) => $"""
+        <Project>
+          <PropertyGroup>
+            <!-- Where Trinity's source is. TRINITY_ROOT (set by Trinity Editor) wins; the editor keeps this path up to date. -->
+            <TrinityRoot Condition="'$(TRINITY_ROOT)' != ''">$([MSBuild]::EnsureTrailingSlash('$(TRINITY_ROOT)'))</TrinityRoot>
+            <TrinityRoot Condition="'$(TrinityRoot)' == ''">{engine}/</TrinityRoot>
+          </PropertyGroup>
+          <Import Project="$(TrinityRoot)Directory.Build.props" />
+        </Project>
+        """;
+
+    /// <summary>The engine folder the editor builds and runs games with (set at startup).</summary>
+    public static string? Current;
+
+    /// <summary>Points a build or run of a game at <see cref="Current"/>.</summary>
+    public static void UseEngine(ProcessStartInfo start)
+    {
+        if (Current != null)
+            start.Environment["TRINITY_ROOT"] = Current;
+    }
+
+    /// <summary>Repairs a project's engine path if Trinity moved (<see cref="RepairEngine"/>), saying so in the log.</summary>
+    public static void CheckEngine(string projectFolder)
+    {
+        if (Current == null)
+            return;
+        try
+        {
+            if (RepairEngine(projectFolder, Current) is { } old)
+                Log.Info("projects", $"{projectFolder}: Trinity was at {old}, now at {Current}; Directory.Build.props updated");
+        }
+        catch (Exception e)
+        {
+            Log.Warn("projects", $"couldn't update {projectFolder}'s engine path: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// If the project's Directory.Build.props points at a folder that isn't Trinity any more (Trinity was
+    /// moved), points it at <paramref name="engine"/>. Returns the old path when it changed it.
+    /// </summary>
+    public static string? RepairEngine(string projectFolder, string engine)
+    {
+        var props = Path.Combine(projectFolder, "Directory.Build.props");
+        if (!File.Exists(props))
+            return null;
+        var text = File.ReadAllText(props);
+        // The written path: <TrinityRoot>path/</TrinityRoot>, with or without a condition (not the $(...) one)
+        var match = System.Text.RegularExpressions.Regex.Match(text, @"<TrinityRoot(?: Condition=""'\$\(TrinityRoot\)' == ''"")?>(?<path>[^$<][^<]*)</TrinityRoot>");
+        if (!match.Success)
+            return null;
+        var written = match.Groups["path"].Value.TrimEnd('/');
+        if (IsEngineRoot(written) || !IsEngineRoot(engine))
+            return null;
+        var temp = props + ".tmp";
+        File.WriteAllText(temp, EngineProps(engine).ReplaceLineEndings("\n") + "\n");
+        File.Move(temp, props, overwrite: true);
+        return written;
     }
 
     static void Write(string folder, string file, string text) => File.WriteAllText(Path.Combine(folder, file), text.ReplaceLineEndings("\n") + "\n");

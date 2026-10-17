@@ -96,14 +96,7 @@ public sealed class Scene
     public IEnumerable<Node> Nodes => World.All().Select(e => new Node(World, e));
 
     /// <summary>A node by a path of names from the top ("House/Front door"), or <see cref="Node.None"/>.</summary>
-    public Node Find(string path)
-    {
-        var parts = path.Split('/', 2);
-        foreach (var root in World.Roots)
-            if (World.Name(root) == parts[0])
-                return parts.Length == 1 ? new Node(World, root) : new Node(World, root).Find(parts[1]);
-        return Node.None;
-    }
+    public Node Find(string path) => Node.FindIn(World, World.Roots, path.Trim('/'));
 
     /// <summary>A new, empty node; scripts added to it start at the next update.</summary>
     public Node Create(string name = "Node", Node parent = default) => new(World, World.Create(name, parent.Id));

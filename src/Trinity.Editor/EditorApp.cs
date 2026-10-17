@@ -362,21 +362,30 @@ sealed partial class EditorApp : IDisposable
         if (ImGui.BeginMenu("Run"))
         {
             if (ImGui.MenuItem("Play", "F5", false, !_runner.Running)) Play();
+            if (ImGui.MenuItem("Play this scene", "F6", false, !_runner.Running)) Play(thisScene: true);
             if (ImGui.MenuItem("Stop", "Shift+F5", false, _runner.Running)) _runner.Stop();
             ImGui.EndMenu();
         }
 
-        // Play / Stop in the middle of the bar
-        ImGui.SetCursorPosX(ImGui.GetWindowWidth() / 2 - 60);
+        // Play, Play this scene and Stop in the middle of the bar
+        ImGui.SetCursorPosX(ImGui.GetWindowWidth() / 2 - 100);
         if (_runner.Running)
         {
             if (ImGui.Button("  Stop  ")) _runner.Stop();
             ImGui.SameLine();
             ImGui.TextColored(ImGuiHost.Color(0.88f, 0.66f, 0.36f), "running");
         }
-        else if (ImGui.Button("  Play  "))
+        else
         {
-            Play();
+            if (ImGui.Button("  Play  "))
+                Play();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Run the game from its first scene (F5)");
+            ImGui.SameLine();
+            if (ImGui.Button("Play this scene"))
+                Play(thisScene: true);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip($"Run the game from {_scene.Path} (F6)");
         }
         ImGui.EndMainMenuBar();
 
@@ -424,6 +433,8 @@ sealed partial class EditorApp : IDisposable
             if (io.KeyShift) _runner.Stop();
             else Play();
         }
+        if (ImGui.IsKeyPressed(ImGuiKey.F6, false))
+            Play(thisScene: true);
         if (io.WantTextInput || _scripts.HasFocus)
             return;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.S)) SaveScene();
@@ -438,15 +449,21 @@ sealed partial class EditorApp : IDisposable
     }
 
     /// <summary>Saves the scene and scripts, then runs the game.</summary>
-    void Play()
+    /// <summary>Saves, then runs the game from its own first scene (F5), or from the scene being edited (F6).</summary>
+    void Play(bool thisScene = false)
     {
         if (_runner.Running)
             return;
         if (_scene.Dirty)
             SaveScene();
+        if (thisScene && !File.Exists(_project.Absolute(_scene.Path)))
+        {
+            Log.Warn("play", "save the scene first, so the game can load it");
+            return;
+        }
         _scripts.SaveAll();
         _scripts.Checker.ClearRuntime();
-        _runner.Play(_project);
+        _runner.Play(_project, thisScene ? _project.Absolute(_scene.Path) : null);
     }
 
     // --- Panels --------------------------------------------------------------------------------------
@@ -808,11 +825,7 @@ sealed partial class EditorApp : IDisposable
     }
 
     /// <summary>After opening a scene: if it has an autosave newer than the file, offer to bring those changes back.</summary>
-    void OfferAutosave(string path)
-    {
-        if (EditorScene.HasNewerAutosave(_library, path))
-            _askRestore = true;
-    }
+    void OfferAutosave(string path) => _askRestore = EditorScene.HasNewerAutosave(_library, path);
 
     void SceneDialogs()
     {
@@ -823,7 +836,9 @@ sealed partial class EditorApp : IDisposable
         }
         if (_askRestore)
         {
-            ImGui.OpenPopup("restore-autosave");
+            // Only for the scene open now (another may have been opened since this was asked)
+            if (EditorScene.HasNewerAutosave(_library, _scene.Path))
+                ImGui.OpenPopup("restore-autosave");
             _askRestore = false;
         }
         var centre = ImGui.GetMainViewport().GetCenter();

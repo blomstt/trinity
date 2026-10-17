@@ -8,6 +8,8 @@ using Trinity.Editor;
 //                  [--screenshot out.png SECONDS]
 
 var settings = Settings.Load("trinity-editor");
+// The Trinity this editor belongs to: games it builds and runs use it (see ProjectTemplate.UseEngine)
+ProjectTemplate.Current = ProjectTemplate.EngineRoot(settings);
 (string, double)? screenshot = null;
 string? path = null, open = null, select = null, sceneFile = null;
 for (var a = 0; a < args.Length; a++)
@@ -45,6 +47,7 @@ while (true)
             return 0;
     }
     ProjectManager.Opened(settings, project.Root);
+    ProjectTemplate.CheckEngine(project.Root);
 
     bool back;
     using (var editor = new EditorApp(project, settings, splash) { Screenshot = first ? screenshot : null })

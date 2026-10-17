@@ -35,10 +35,14 @@ sealed class GameRunner : IDisposable
     /// <summary>Every output line, for the script checker to find errors in.</summary>
     public event Action<string>? Output;
 
-    public void Play(EditorProject project)
+    string? _scene; // the scene file to start with (absolute), or null for the game's own first scene
+
+    /// <summary>Runs the game: from its own first scene, or from <paramref name="scene"/> (an absolute path; "Play this scene").</summary>
+    public void Play(EditorProject project, string? scene = null)
     {
         if (Running)
             return;
+        _scene = scene;
         if (!File.Exists(project.GamePath))
         {
             Log.Error("play", $"no game project at {project.GamePath} (set \"game\" in trinity.json)");
@@ -58,6 +62,9 @@ sealed class GameRunner : IDisposable
         // The editor already showed the BRUTAL logo; don't repeat it on every run and restart
         start.Environment["TRINITY_SKIP_SPLASH"] = "1";
         start.Environment["DOTNET_WATCH_SUPPRESS_EMOJIS"] = "1";
+        if (scene != null)
+            start.Environment[Trinity.Scenes.SceneGame.SceneVariable] = scene;
+        ProjectTemplate.UseEngine(start);
         if (HotReload)
             Log.Info("play", $"building and starting {project.Name}; saved scripts apply while it runs (hot reload)");
         else
@@ -106,7 +113,7 @@ sealed class GameRunner : IDisposable
     {
         Log.Info("play", "restarting the game with the saved scripts");
         Stop();
-        Play(project);
+        Play(project, _scene);
     }
 
     public void Dispose()
