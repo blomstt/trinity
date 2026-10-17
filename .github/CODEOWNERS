@@ -1,0 +1,7 @@
+# Who reviews what. When a pull request changes files matched below, GitHub asks their owners for a
+# review. Later lines win over earlier ones, so specific areas go below the catch-all.
+# Add an area when a maintainer takes one on, for example:
+#   /src/Trinity.Editor/    @someone
+#   /src/Trinity.Rendering/ @someone
+
+*                @blomstt
