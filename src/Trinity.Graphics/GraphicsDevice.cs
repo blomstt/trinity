@@ -88,11 +88,15 @@ public sealed unsafe class GraphicsDevice : IDisposable
         VSync = vsync;
         _offscreen = offscreen != null;
 
-        // Instance, with whatever GLFW needs for a surface on this platform (Wayland or X11)
+        // Instance, with whatever GLFW needs for a surface on this platform (Wayland, X11 or Metal)
         var extensions = new HashSet<string>();
         var glfwExtensions = Glfw.GetRequiredInstanceExtensions(out var count);
+        if (count == 0)
+            throw new Exception("GLFW found no Vulkan loader (libvulkan) or no surface support for this platform");
         for (var i = 0; i < count; i++)
             extensions.Add(new string((sbyte*)glfwExtensions[i]));
+        // On macOS, Vulkan runs on Metal through a portability driver (MoltenVK), which the loader only lists when asked
+        VulkanHelpers.AddPlatformRequiredExtensions(extensions);
         var layers = new HashSet<string>();
         if (Environment.GetEnvironmentVariable("TRINITY_VALIDATION") == "1" && VulkanHelpers.Validation.IsSupported)
             VulkanHelpers.AddValidationLayers(layers);
@@ -101,6 +105,7 @@ public sealed unsafe class GraphicsDevice : IDisposable
             new Instance.CreateInfo
             {
                 AppInfo = new VkApplicationInfo { ApiVersion = (1 << 22) | (3 << 12) }, // Vulkan 1.3
+                Flags = VulkanHelpers.GetPlatformRequiredInstanceCreateFlags(),
                 EnabledExtensions = extensions,
                 EnabledLayers = layers,
             }
@@ -120,13 +125,27 @@ public sealed unsafe class GraphicsDevice : IDisposable
         var supported12 = new VkPhysicalDeviceVulkan12Features { Next = &supported13 };
         var supported = new VkPhysicalDeviceFeatures2 { Next = &supported12 };
         PhysicalDevice.GetFeatures2(ref supported);
+        // Bindless arrays are update-after-bind, so they count against its limits, which can be far higher
+        // (MoltenVK: 16 samplers per stage without, 1024 with)
         var bindless = supported12.DescriptorIndexing && supported12.RuntimeDescriptorArray && supported12.DescriptorBindingPartiallyBound
             && supported12.ShaderSampledImageArrayNonUniformIndexing && supported12.DescriptorBindingVariableDescriptorCount
+            && supported12.DescriptorBindingSampledImageUpdateAfterBind
             && Environment.GetEnvironmentVariable("TRINITY_NO_BINDLESS") != "1";
         var limits = props.Limits;
+        var limits12 = new VkPhysicalDeviceVulkan12Properties();
+        var props2 = new VkPhysicalDeviceProperties2 { Next = &limits12 };
+        PhysicalDevice.GetProperties2(ref props2);
+        // A combined image sampler counts as a sampler, a sampled image and a resource at once, and the
+        // frame's own few samplers (shadow map, HDR, sky tables) share the same per-stage limits
+        const int otherSamplers = 8;
+        var maxTextures = bindless
+            ? Math.Min(16384, Math.Min(limits12.MaxPerStageDescriptorUpdateAfterBindSampledImages,
+                Math.Min(limits12.MaxPerStageDescriptorUpdateAfterBindSamplers, limits12.MaxPerStageUpdateAfterBindResources)) - otherSamplers)
+            : Math.Min(64, Math.Min(limits.MaxPerStageDescriptorSampledImages,
+                Math.Min(limits.MaxPerStageDescriptorSamplers, limits.MaxPerStageResources)) - otherSamplers);
         Features = new GpuFeatures(
             bindless,
-            bindless ? Math.Min(16384, limits.MaxPerStageDescriptorSampledImages) : Math.Min(64, limits.MaxPerStageDescriptorSamplers),
+            maxTextures,
             supported.Features.SamplerAnisotropy ? limits.MaxSamplerAnisotropy : 1,
             supported.Features.DepthClamp,
             limits.TimestampComputeAndGraphics ? limits.TimestampPeriod : 0
@@ -154,6 +173,7 @@ public sealed unsafe class GraphicsDevice : IDisposable
             DescriptorBindingPartiallyBound = bindless,
             ShaderSampledImageArrayNonUniformIndexing = bindless,
             DescriptorBindingVariableDescriptorCount = bindless,
+            DescriptorBindingSampledImageUpdateAfterBind = bindless,
             HostQueryReset = supported12.HostQueryReset,
         };
         var core = new VkPhysicalDeviceFeatures
@@ -161,10 +181,13 @@ public sealed unsafe class GraphicsDevice : IDisposable
             SamplerAnisotropy = supported.Features.SamplerAnisotropy,
             DepthClamp = supported.Features.DepthClamp,
         };
+        // A portability driver must have VK_KHR_portability_subset enabled; elsewhere this adds nothing
+        var deviceExtensions = new HashSet<string> { "VK_KHR_swapchain" };
+        VulkanHelpers.AddMandatoryIfSupportedDeviceExtensions(deviceExtensions, PhysicalDevice);
         Device = PhysicalDevice.CreateDevice(
             new DeviceEx.CreateInfo
             {
-                Extensions = ["VK_KHR_swapchain"],
+                Extensions = [.. deviceExtensions],
                 QueueCreateInfos = new ReadOnlySpan<VkDeviceQueueCreateInfo>(&queueInfo, 1),
                 Features = &core,
                 Next = &vulkan12,
