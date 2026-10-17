@@ -364,12 +364,9 @@ public sealed class World
         Matrix4x4 world = keepWorld ? WorldMatrix(child) : default;
         Unlink(i);
         Link(i, parent.IsNone ? NoIndex : Index(parent), index);
-        if (keepWorld)
-        {
-            var parentWorld = parent.IsNone ? Matrix4x4.Identity : WorldMatrix(parent);
-            Matrix4x4.Invert(parentWorld, out var inv);
+        // A parent scaled to nothing can't be undone (no inverse): the child keeps its local transform then
+        if (keepWorld && Matrix4x4.Invert(parent.IsNone ? Matrix4x4.Identity : WorldMatrix(parent), out var inv))
             SetLocalMatrix(child, world * inv);
-        }
         MarkDirty(i);
     }
 
@@ -509,7 +506,8 @@ public sealed class World
     /// <summary>Sets the local transform from a matrix (scale, rotation, translation; skew is lost).</summary>
     public void SetLocalMatrix(EntityId e, Matrix4x4 m)
     {
-        if (!Matrix4x4.Decompose(m, out var scale, out var q, out var translation))
+        if (!Matrix4x4.Decompose(m, out var scale, out var q, out var translation)
+            || !float.IsFinite(translation.X + translation.Y + translation.Z + scale.X + scale.Y + scale.Z + q.X + q.Y + q.Z + q.W))
             return;
         var i = Index(e);
         _position[i] = translation;

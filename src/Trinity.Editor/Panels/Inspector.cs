@@ -22,6 +22,7 @@ sealed partial class EditorApp
 
     readonly Dictionary<string, ImInputString> _textEdits = [];
     string? _activeText;
+    EntityId _textEditsFor;
 
     void Inspector()
     {
@@ -34,6 +35,12 @@ sealed partial class EditorApp
         _inspectorDock = ImGui.GetWindowDockID();
         var w = _scene.World;
         var e = _scene.Primary;
+        // Text buffers belong to the node shown; drop them when that changes, so they don't pile up
+        if (e != _textEditsFor)
+        {
+            _textEdits.Clear();
+            _textEditsFor = e;
+        }
         if (!w.IsAlive(e))
         {
             ImGui.TextDisabled("Nothing selected");
@@ -110,7 +117,7 @@ sealed partial class EditorApp
         if (_pendingInspector is { } pending)
         {
             _pendingInspector = null;
-            pending();
+            Safely(pending);
         }
     }
 
@@ -245,16 +252,17 @@ sealed partial class EditorApp
             _textEdits[key] = edit = new ImInputString(256);
         if (_activeText != key)
             edit.SetValue(current.AsSpan());
-        ImGui.InputText(label, edit);
-        if (ImGui.IsItemActive())
-            _activeText = key;
-        if (ImGui.IsItemDeactivatedAfterEdit())
+        // Applied as it's typed (one undo step for the whole entry), so selecting something else
+        // mid-edit can't lose it; an emptied name isn't applied
+        if (ImGui.InputText(label, edit))
         {
             var text = edit.ToString();
             if (text != current && !(path == "Name" && text.Length == 0))
-                Report(_scene.SetProperty(e, path, SceneSchema.Text(text)));
+                Report(_scene.SetProperty(e, path, SceneSchema.Text(text), merge: true));
         }
-        if (!ImGui.IsItemActive() && _activeText == key)
+        if (ImGui.IsItemActive())
+            _activeText = key;
+        else if (_activeText == key)
             _activeText = null;
     }
 

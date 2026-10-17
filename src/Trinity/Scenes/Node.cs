@@ -211,6 +211,7 @@ public sealed class Vector3Converter : JsonConverter<Vector3>
 
     public override void Write(Utf8JsonWriter writer, Vector3 value, JsonSerializerOptions options)
     {
+        value = SceneSchema.Finite(value); // JSON can't hold NaN or infinity
         writer.WriteStartArray();
         writer.WriteNumberValue(value.X);
         writer.WriteNumberValue(value.Y);

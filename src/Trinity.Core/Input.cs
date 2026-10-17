@@ -46,6 +46,22 @@ public sealed class Input
         w.OnScroll += (_, offset) => _scroll += offset;
         w.OnCursorPos += (_, pos) => _mouse = pos;
         w.OnChar += (_, codepoint) => _text.Add(codepoint);
+        // Keys released while another window has focus never reach this one: let go of everything
+        // when focus goes, or a key held during alt-tab would stay down
+        w.OnFocus += (_, focus) =>
+        {
+            if (focus == GlfwFocusEvent.LostFocus)
+                ReleaseAll();
+        };
+    }
+
+    /// <summary>Releases every held key and mouse button (as if each was let go), for when the window loses focus.</summary>
+    internal void ReleaseAll()
+    {
+        foreach (var key in _keys.ToArray())
+            Key(key, false);
+        foreach (var button in _buttons.ToArray())
+            Button(button, false);
     }
 
     /// <summary>Input with no window, fed by <see cref="Key"/> and <see cref="Button"/> (for tests).</summary>

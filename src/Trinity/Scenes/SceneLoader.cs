@@ -90,7 +90,13 @@ public sealed class SceneLibrary(string root)
         }
         if (doc == null)
             return (null, Problem($"{name}: empty scene file"));
-        var problems = Validate(doc, name);
+        var problems = new SceneProblems();
+        if (doc.Nodes == null)
+        {
+            problems.Warnings.Add($"{name}: \"Nodes\" is null; read as no nodes");
+            doc.Nodes = [];
+        }
+        problems.Add(Validate(doc, name));
         return (problems.Ok ? doc : null, problems);
     }
 
@@ -153,10 +159,19 @@ public sealed class SceneLibrary(string root)
                 p.Errors.Add($"{who}: ids must be positive");
             else if (!seen.Add(r.Id))
                 p.Errors.Add($"{who}: id used twice");
-            if (r.Parent != 0 && !seen.Contains(r.Parent))
+            if (r.Parent == r.Id && r.Id != 0)
+                p.Errors.Add($"{who}: is its own parent");
+            else if (r.Parent != 0 && !seen.Contains(r.Parent))
                 p.Errors.Add(doc.Nodes.Any(o => o.Id == r.Parent)
                     ? $"{who}: comes before its parent {r.Parent} (nodes must be in hierarchy order)"
                     : $"{who}: parent {r.Parent} doesn't exist");
+            if (!IsFinite(r.Position) || !IsFinite(r.Rotation) || !IsFinite(r.Scale))
+            {
+                p.Warnings.Add($"{who}: transform has a number too large (or not a number); reset");
+                if (!IsFinite(r.Position)) r.Position = Vector3.Zero;
+                if (!IsFinite(r.Rotation)) r.Rotation = Vector3.Zero;
+                if (!IsFinite(r.Scale)) r.Scale = Vector3.One;
+            }
             if (r.Instance is { Length: 0 })
                 p.Errors.Add($"{who}: empty instance path");
             foreach (var (component, props) in r.Components ?? [])
@@ -183,6 +198,8 @@ public sealed class SceneLibrary(string root)
             doc.NextId = doc.Nodes.Count == 0 ? 1 : doc.Nodes.Max(n => n.Id) + 1; // repair, harmlessly
         return p;
     }
+
+    static bool IsFinite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
 
     // --- Building worlds ----------------------------------------------------------------------------
 
@@ -254,7 +271,8 @@ public sealed class SceneLibrary(string root)
         var rootIndex = insertAt;
         foreach (var r in doc.Nodes)
         {
-            var parent = r.Parent == 0 ? attach : byId[r.Parent];
+            // Validated documents list parents first; anything else (a document built in code) goes at the top
+            var parent = r.Parent == 0 || !byId.TryGetValue(r.Parent, out var p) ? attach : p;
             var inherited = !owner.IsNone;
             var e = w.Create(r.Name, parent, inherited ? 0 : r.Id);
             if (r.Parent == 0 && rootIndex >= 0)

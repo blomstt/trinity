@@ -80,6 +80,41 @@ sealed class EditorScene
         Path = path ?? Path;
         Library.Save(Path, ToDocument());
         Dirty = false;
+        // Saved: an autosave of earlier unsaved changes is out of date
+        DiscardAutosave();
+    }
+
+    /// <summary>Where unsaved changes are kept: beside the scene, never over it.</summary>
+    public string AutosavePath => AutosaveOf(Path);
+
+    public static string AutosaveOf(string path) =>
+        path.EndsWith(".scene.json", StringComparison.Ordinal) ? path[..^".scene.json".Length] + ".autosave.scene.json" : path + ".autosave";
+
+    /// <summary>Writes the unsaved changes to <see cref="AutosavePath"/>.</summary>
+    public void Autosave() => Library.Save(AutosavePath, ToDocument());
+
+    public void DiscardAutosave()
+    {
+        var file = Library.Absolute(AutosavePath);
+        if (File.Exists(file))
+            File.Delete(file);
+    }
+
+    /// <summary>Whether an autosave holds changes newer than the scene file (left by a quit or crash before saving).</summary>
+    public static bool HasNewerAutosave(SceneLibrary library, string path)
+    {
+        var autosave = library.Absolute(AutosaveOf(path));
+        var scene = library.Absolute(path);
+        return File.Exists(autosave) && (!File.Exists(scene) || File.GetLastWriteTimeUtc(autosave) > File.GetLastWriteTimeUtc(scene));
+    }
+
+    /// <summary>The scene with the unsaved changes from its autosave, ready to review and save (it's marked unsaved).</summary>
+    public static EditorScene LoadAutosave(SceneLibrary library, string path, out SceneProblems problems)
+    {
+        var scene = Load(library, AutosaveOf(path), out problems);
+        scene.Path = path;
+        scene.Dirty = true;
+        return scene;
     }
 
     // --- Selection ----------------------------------------------------------------------------------
@@ -259,14 +294,24 @@ sealed class EditorScene
     }
 
     /// <summary>Runs a structural change and records it as a before/after snapshot.</summary>
-    T Structural<T>(string label, Func<T> change)
+    internal T Structural<T>(string label, Func<T> change)
     {
         _open = null;
         var before = Snapshot();
         if (before == _lastSnapshot)
             before = _lastSnapshot; // share the previous step's copy
         var selectionBefore = Selection.Select(Key).ToArray();
-        var result = change();
+        T result;
+        try
+        {
+            result = change();
+        }
+        catch
+        {
+            // Put the scene back as it was, so a failed edit leaves nothing half done
+            Restore(before, selectionBefore);
+            throw;
+        }
         PruneSelection();
         _lastSnapshot = Snapshot();
         Record(new SnapshotEdit(label, before, _lastSnapshot, selectionBefore, Selection.Select(Key).ToArray()));

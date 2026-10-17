@@ -39,11 +39,21 @@ public static class SceneSchema
 {
     public static JsonElement Json(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
-    public static JsonElement Float(float v) => Json(v.ToString("R", CultureInfo.InvariantCulture));
+    /// <summary>
+    /// A number JSON can hold: NaN becomes 0 and infinities the largest float. JSON has no non-finite
+    /// numbers, so writing one would fail, and a scene with one in it could never be saved again.
+    /// </summary>
+    public static float Finite(float v) => float.IsNaN(v) ? 0 : float.IsPositiveInfinity(v) ? float.MaxValue : float.IsNegativeInfinity(v) ? float.MinValue : v;
+
+    public static Vector3 Finite(Vector3 v) => new(Finite(v.X), Finite(v.Y), Finite(v.Z));
+
+    public static JsonElement Float(float v) => Json(Finite(v).ToString("R", CultureInfo.InvariantCulture));
     public static JsonElement Int(int v) => Json(v.ToString(CultureInfo.InvariantCulture));
     public static JsonElement Bool(bool v) => Json(v ? "true" : "false");
     public static JsonElement Text(string v) => Json(JsonSerializer.Serialize(v, SceneJson.Default.String));
-    public static JsonElement Vector(Vector3 v) =>
+    public static JsonElement Vector(Vector3 v) => VectorJson(Finite(v));
+
+    static JsonElement VectorJson(Vector3 v) =>
         Json($"[{v.X.ToString("R", CultureInfo.InvariantCulture)}, {v.Y.ToString("R", CultureInfo.InvariantCulture)}, {v.Z.ToString("R", CultureInfo.InvariantCulture)}]");
 
     /// <summary>A live entity reference, as kept in memory after loading (files hold <c>{"$entity": "path"}</c> instead).</summary>
@@ -64,10 +74,11 @@ public static class SceneSchema
     public static bool Fits(PropertyKind kind, JsonElement v) => kind switch
     {
         PropertyKind.Text or PropertyKind.Asset => v.ValueKind == JsonValueKind.String,
-        PropertyKind.Float => v.ValueKind == JsonValueKind.Number,
+        PropertyKind.Float => v.ValueKind == JsonValueKind.Number && v.TryGetSingle(out var f) && float.IsFinite(f),
         PropertyKind.Int => v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out _),
         PropertyKind.Bool => v.ValueKind is JsonValueKind.True or JsonValueKind.False,
-        PropertyKind.Vector3 => v.ValueKind == JsonValueKind.Array && v.GetArrayLength() == 3 && v.EnumerateArray().All(e => e.ValueKind == JsonValueKind.Number),
+        PropertyKind.Vector3 => v.ValueKind == JsonValueKind.Array && v.GetArrayLength() == 3
+            && v.EnumerateArray().All(e => e.ValueKind == JsonValueKind.Number && e.TryGetSingle(out var c) && float.IsFinite(c)),
         PropertyKind.Entity => v.ValueKind == JsonValueKind.Object && (v.TryGetProperty("$entity", out _) || v.TryGetProperty("$id", out _)) || v.ValueKind == JsonValueKind.Null,
         _ => false,
     };

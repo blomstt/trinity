@@ -60,10 +60,10 @@ sealed partial class EditorApp
         try
         {
             foreach (var d in Directory.EnumerateDirectories(full))
-                if (!ProjectFiles.Ignored(Path.GetFileName(d)))
+                if (!ProjectFiles.Ignored(full, Path.GetFileName(d)))
                     node.Children.Add(Scan(d, Join(relative, Path.GetFileName(d)), Path.GetFileName(d)));
             foreach (var f in Directory.EnumerateFiles(full))
-                if (!ProjectFiles.Ignored(Path.GetFileName(f)))
+                if (!ProjectFiles.Ignored(full, Path.GetFileName(f)))
                     node.Children.Add(new FsNode(Join(relative, Path.GetFileName(f)), Path.GetFileName(f), false, File.GetLastWriteTimeUtc(f)));
         }
         catch (IOException) { }
@@ -249,7 +249,9 @@ sealed partial class EditorApp
             {
                 var moving = _draggedAsset;
                 var to = Join(node.Path, Path.GetFileName(moving));
-                if (moving != node.Path && Parent(moving) != node.Path && !node.Path.StartsWith(moving + "/", StringComparison.Ordinal))
+                if (File.Exists(_project.Absolute(to)) || Directory.Exists(_project.Absolute(to)))
+                    Log.Warn("editor", $"{node.Path} already has a {Path.GetFileName(moving)}; not moved");
+                else if (moving != node.Path && Parent(moving) != node.Path && !node.Path.StartsWith(moving + "/", StringComparison.Ordinal))
                     _afterTree = () => MoveFile(moving, to);
             }
             ImGui.EndDragDropTarget();
@@ -338,7 +340,7 @@ sealed partial class EditorApp
         if (!isRoot)
         {
             if (ImGui.MenuItem("Rename..."))
-                Prompt("Rename", node.Name, name => MoveFile(path, Join(Parent(path), name)));
+                Prompt("Rename", node.Name, name => MoveFile(path, Join(Parent(path), node.Folder ? name : ProjectFiles.KeepExtension(node.Name, name))));
             if (ImGui.MenuItem("Duplicate..."))
                 Prompt("Duplicate", CopyName(node.Name), name =>
                 {

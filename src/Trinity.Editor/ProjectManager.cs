@@ -626,7 +626,7 @@ sealed class ProjectManager : IDisposable
             yield break;
         }
         foreach (var d in subfolders)
-            if (!ProjectFiles.Ignored(Path.GetFileName(d)) && Path.GetFileName(d) != "node_modules")
+            if (!ProjectFiles.Ignored(folder, Path.GetFileName(d)) && Path.GetFileName(d) != "node_modules")
                 foreach (var p in FindProjects(d, depth - 1))
                     yield return p;
     }

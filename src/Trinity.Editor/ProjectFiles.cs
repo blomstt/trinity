@@ -10,11 +10,15 @@ namespace Trinity.Editor;
 /// </summary>
 static class ProjectFiles
 {
-    /// <summary>Folders and files the dock and these operations leave alone.</summary>
-    public static bool Ignored(string name) =>
-        name.StartsWith('.') || name is "bin" or "obj"
+    /// <summary>Folders and files in <paramref name="folder"/> the dock and these operations leave alone: hidden ones, build output, and the editor's own working files.</summary>
+    public static bool Ignored(string folder, string name) =>
+        name.StartsWith('.') || IsBuildOutput(folder, name)
         || name.EndsWith(".autosave.scene.json", StringComparison.Ordinal)
         || name.EndsWith(".unsaved", StringComparison.Ordinal) || name.EndsWith(".tmp", StringComparison.Ordinal);
+
+    /// <summary>A .NET project's bin or obj folder: only beside a .csproj, so an asset folder that happens to be called "bin" is kept.</summary>
+    public static bool IsBuildOutput(string folder, string name) =>
+        name is "bin" or "obj" && Directory.Exists(folder) && Directory.EnumerateFiles(folder, "*.csproj").Any();
 
     /// <summary>Every scene file in the project, project-relative.</summary>
     public static IEnumerable<string> Scenes(string root) =>
@@ -23,10 +27,10 @@ static class ProjectFiles
     static IEnumerable<string> Walk(string root, string dir)
     {
         foreach (var f in Directory.EnumerateFiles(dir))
-            if (!Ignored(Path.GetFileName(f)))
+            if (!Ignored(dir, Path.GetFileName(f)))
                 yield return SceneLibrary.Normalize(Path.GetRelativePath(root, f));
         foreach (var d in Directory.EnumerateDirectories(dir))
-            if (!Ignored(Path.GetFileName(d)))
+            if (!Ignored(dir, Path.GetFileName(d)))
                 foreach (var f in Walk(root, d))
                     yield return f;
     }
@@ -194,6 +198,18 @@ static class ProjectFiles
         return target;
     }
 
+    /// <summary>
+    /// The name a renamed file keeps its kind with: typing "boulder" for "rock.glb" gives "boulder.glb",
+    /// and a scene keeps ".scene.json". A name typed with an extension of its own is used as typed.
+    /// </summary>
+    public static string KeepExtension(string original, string typed)
+    {
+        if (original.EndsWith(".scene.json", StringComparison.Ordinal))
+            return typed.EndsWith(".scene.json", StringComparison.Ordinal) ? typed : typed.TrimEnd('.') + ".scene.json";
+        var ext = Path.GetExtension(original);
+        return ext.Length == 0 || Path.GetExtension(typed).Length > 0 ? typed : typed + ext;
+    }
+
     /// <summary>Copies a file, or a folder and everything in it (leaving out build output).</summary>
     public static void Copy(string from, string to)
     {
@@ -206,7 +222,7 @@ static class ProjectFiles
         foreach (var f in Directory.EnumerateFiles(from))
             File.Copy(f, Path.Combine(to, Path.GetFileName(f)));
         foreach (var d in Directory.EnumerateDirectories(from))
-            if (Path.GetFileName(d) is not ("bin" or "obj"))
+            if (!IsBuildOutput(from, Path.GetFileName(d)))
                 Copy(d, Path.Combine(to, Path.GetFileName(d)));
     }
 }

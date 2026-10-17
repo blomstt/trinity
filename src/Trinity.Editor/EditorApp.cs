@@ -74,6 +74,7 @@ sealed partial class EditorApp : IDisposable
         LoadFavorites();
         var main = SceneLibrary.Normalize(Path.Combine(project.Scenes, "main.scene.json"));
         _scene = File.Exists(project.Absolute(main)) ? LoadScene(main) : EditorScene.New(_library, main);
+        OfferAutosave(main);
         UseSceneCamera();
         Log.Info("editor", $"project {project.Name} at {project.Root}, scene {_scene.Path}");
     }
@@ -113,10 +114,38 @@ sealed partial class EditorApp : IDisposable
         var clock = Stopwatch.StartNew();
         var last = 0.0;
         double lastActivity = 0, lastFrame = 0;
-        _window.Activity += () => lastActivity = clock.Elapsed.TotalSeconds;
         Log.Written += WakeOnLog;
-        while (!_window.ShouldClose)
+        try
         {
+            Loop(clock, lastActivity, lastFrame, last);
+        }
+        finally
+        {
+            // Also when something threw: unsaved work is written beside the scene before the editor goes
+            Log.Written -= WakeOnLog;
+            _scripts.KeepUnsaved();
+            if (_scene.Dirty)
+                Log.Warn("editor", $"unsaved changes kept in {Autosave(0)}");
+        }
+    }
+
+    void Loop(Stopwatch clock, double lastActivity, double lastFrame, double last)
+    {
+        _window.Activity += () => lastActivity = clock.Elapsed.TotalSeconds;
+        while (true)
+        {
+            // Closing the window with unsaved changes asks first (Save, Don't save, Cancel)
+            if (_window.ShouldClose)
+            {
+                if (!_scene.Dirty || _closing || Screenshot != null)
+                    break;
+                _window.ShouldClose = false;
+                RequestLeave(() =>
+                {
+                    _closing = true;
+                    _window.ShouldClose = true;
+                });
+            }
             // Draw only when something changed: input in the last half second, playing animations, a
             // new log line, or a once-a-second refresh for the stats. Otherwise don't draw at all:
             // on Wayland each presented frame wakes the event wait again, so waiting isn't enough.
@@ -163,29 +192,24 @@ sealed partial class EditorApp : IDisposable
             if (_scene.Dirty && now - _autosaved > 120)
                 Autosave(now);
         }
-
-        Log.Written -= WakeOnLog;
-        _scripts.KeepUnsaved();
-        if (_scene.Dirty)
-            Log.Warn("editor", $"unsaved changes kept in {Autosave(0)}");
     }
 
     double _autosaved;
+    bool _closing;
 
     /// <summary>Writes unsaved changes beside the scene (not over it), every couple of minutes and on quit.</summary>
     string Autosave(double now)
     {
         _autosaved = now;
-        var backup = _scene.Path.Replace(".scene.json", ".autosave.scene.json");
         try
         {
-            _library.Save(backup, _scene.ToDocument());
+            _scene.Autosave();
         }
         catch (Exception e)
         {
             Log.Error("editor", $"autosave failed: {e.Message}");
         }
-        return backup;
+        return _scene.AutosavePath;
     }
 
     bool Animating()
@@ -237,8 +261,9 @@ sealed partial class EditorApp : IDisposable
         if (_afterTree is { } after)
         {
             _afterTree = null;
-            after();
+            Safely(after);
         }
+        SceneDialogs();
         // Edits from one drag or one text entry are one undo step: it ends when nothing is being edited
         if (!ImGui.IsAnyItemActive() && _dragAxis < 0)
             _scene.CloseEdit();
@@ -287,10 +312,12 @@ sealed partial class EditorApp : IDisposable
             if (ImGui.MenuItem("Save scene as...")) openSaveAs = true;
             ImGui.Separator();
             if (ImGui.MenuItem("Quit to Project List"))
-            {
-                BackToProjects = true;
-                _window.ShouldClose = true;
-            }
+                RequestLeave(() =>
+                {
+                    BackToProjects = true;
+                    _closing = true;
+                    _window.ShouldClose = true;
+                });
             if (ImGui.MenuItem("Quit", "Ctrl+Q")) _window.ShouldClose = true;
             ImGui.EndMenu();
         }
@@ -375,9 +402,14 @@ sealed partial class EditorApp : IDisposable
         {
             ImGui.Text("Scene name");
             var enter = ImGui.InputText("##name", _saveAsEdit, ImGuiInputTextFlags.EnterReturnsTrue);
-            if ((ImGui.Button("Save") || enter) && !_saveAsEdit.IsEmpty)
+            var target = SceneLibrary.Normalize(Path.Combine(_project.Scenes, _saveAsEdit.ToString().Trim() + ".scene.json"));
+            // Saving over another scene says so, and takes a deliberate click (Enter doesn't do it)
+            var overwrite = target != _scene.Path && File.Exists(_project.Absolute(target));
+            if (overwrite)
+                ImGui.TextColored(Warning, $"{target} exists: saving replaces it");
+            if ((ImGui.Button(overwrite ? "Replace" : "Save") || enter && !overwrite) && !_saveAsEdit.IsEmpty)
             {
-                SaveScene(SceneLibrary.Normalize(Path.Combine(_project.Scenes, _saveAsEdit.ToString() + ".scene.json")));
+                SaveScene(target);
                 ImGui.CloseCurrentPopup();
             }
             ImGui.EndPopup();
@@ -733,27 +765,142 @@ sealed partial class EditorApp : IDisposable
         return scene;
     }
 
-    void NewScene()
+    void NewScene() => RequestLeave(() => _scene = EditorScene.New(_library, UntitledPath(_project.Root, _project.Scenes)));
+
+    /// <summary>A scene path not taken yet: Scenes/untitled.scene.json, then "untitled 2" and so on, so a new scene never saves over another.</summary>
+    public static string UntitledPath(string root, string scenesFolder)
     {
-        KeepUnsaved();
-        _scene = EditorScene.New(_library, SceneLibrary.Normalize(Path.Combine(_project.Scenes, "untitled.scene.json")));
+        for (var i = 1; ; i++)
+        {
+            var path = SceneLibrary.Normalize(Path.Combine(scenesFolder, i == 1 ? "untitled.scene.json" : $"untitled {i}.scene.json"));
+            if (!File.Exists(Path.Combine(root, path)) && !File.Exists(Path.Combine(root, EditorScene.AutosaveOf(path))))
+                return path;
+        }
     }
 
-    /// <summary>Opens a scene file (an absolute path, or relative to the project).</summary>
-    public void OpenScene(string path)
+    /// <summary>Opens a scene file (an absolute path, or relative to the project), asking first if the open one has unsaved changes.</summary>
+    public void OpenScene(string path) => RequestLeave(() =>
     {
-        KeepUnsaved();
         // A fresh library, so scenes changed outside the editor are read again
         _library = new SceneLibrary(_project.Root);
-        _scene = LoadScene(SceneLibrary.Normalize(_project.Relative(_project.Absolute(path))));
+        var relative = SceneLibrary.Normalize(_project.Relative(_project.Absolute(path)));
+        _scene = LoadScene(relative);
+        OfferAutosave(relative);
         UseSceneCamera();
         Log.Info("editor", $"opened {_scene.Path}");
+    });
+
+    // --- Unsaved changes ------------------------------------------------------------------------------
+
+    Action? _leave;      // what to do once the unsaved changes are dealt with
+    bool _askLeave, _askRestore;
+
+    /// <summary>Runs <paramref name="next"/> (which closes or replaces the scene) now, or after asking about unsaved changes.</summary>
+    void RequestLeave(Action next)
+    {
+        if (!_scene.Dirty)
+        {
+            next();
+            return;
+        }
+        _leave = next;
+        _askLeave = true;
     }
 
-    void KeepUnsaved()
+    /// <summary>After opening a scene: if it has an autosave newer than the file, offer to bring those changes back.</summary>
+    void OfferAutosave(string path)
     {
-        if (_scene.Dirty)
-            Log.Warn("editor", $"unsaved changes to {_scene.Path} kept in {Autosave(ImGui.GetTime())}");
+        if (EditorScene.HasNewerAutosave(_library, path))
+            _askRestore = true;
+    }
+
+    void SceneDialogs()
+    {
+        if (_askLeave)
+        {
+            ImGui.OpenPopup("unsaved-changes");
+            _askLeave = false;
+        }
+        if (_askRestore)
+        {
+            ImGui.OpenPopup("restore-autosave");
+            _askRestore = false;
+        }
+        var centre = ImGui.GetMainViewport().GetCenter();
+        ImGui.SetNextWindowPos(centre, ImGuiCond.Appearing, new float2(0.5f, 0.5f));
+        if (ImGui.BeginPopupModal("unsaved-changes", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
+        {
+            ImGui.Text($"Save changes to {_scene.Path} first?");
+            ImGui.TextDisabled("Not saving discards them.");
+            Action? next = null;
+            if (ImGui.Button("Save", new float2(110, 0)))
+            {
+                SaveScene();
+                if (!_scene.Dirty)
+                    next = _leave; // a failed save keeps the scene open
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Don't save", new float2(110, 0)))
+            {
+                Safely(_scene.DiscardAutosave);
+                _scene.Dirty = false;
+                next = _leave;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new float2(110, 0)) || ImGui.IsKeyPressed(ImGuiKey.Escape))
+                ImGui.CloseCurrentPopup();
+            ImGui.EndPopup();
+            if (!ImGui.IsPopupOpen("unsaved-changes"))
+                _leave = null;
+            if (next != null)
+                Safely(next);
+        }
+        ImGui.SetNextWindowPos(centre, ImGuiCond.Appearing, new float2(0.5f, 0.5f));
+        if (ImGui.BeginPopupModal("restore-autosave", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar))
+        {
+            var when = File.GetLastWriteTime(_project.Absolute(_scene.AutosavePath));
+            ImGui.Text($"{_scene.Path} has unsaved changes from {when:yyyy-MM-dd HH:mm}.");
+            ImGui.TextDisabled("They were kept when the editor closed without saving them.");
+            if (ImGui.Button("Restore them", new float2(140, 0)))
+            {
+                var path = _scene.Path;
+                var restored = EditorScene.LoadAutosave(_library, path, out var problems);
+                foreach (var e in problems.Errors)
+                    Log.Error("scene", e);
+                if (problems.Ok)
+                {
+                    _scene = restored;
+                    UseSceneCamera();
+                    Log.Info("editor", $"restored unsaved changes to {path}: save to keep them");
+                }
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Discard them", new float2(140, 0)))
+            {
+                Safely(_scene.DiscardAutosave);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    /// <summary>
+    /// Runs an editor action, reporting what goes wrong instead of letting it close the editor (and
+    /// lose unsaved work) with it.
+    /// </summary>
+    static void Safely(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception e)
+        {
+            Log.Error("editor", $"{e.GetType().Name}: {e.Message}");
+        }
     }
 
     void SaveScene(string? path = null)
