@@ -2,11 +2,18 @@
 
 A lightweight C# game engine built on [BRUTAL](https://github.com/ahwootech/BRUTAL).
 
+![5,000 animated characters as the sun rises (samples/Sandbox, the crowd scene)](docs/images/trinity-crowd.gif)
+
 BRUTAL provides the foundation: C# access to native libraries, maths, unmanaged memory, jobs, and bindings for Vulkan, GLFW, Jolt, FMOD/OpenAL, FreeType and Dear ImGui. Trinity is everything a game needs above that: a renderer, scenes, animation, terrain, physics integration, navigation, a game UI system, audio, data and saves, and editor tools.
 
 A game is its own C# project that uses Trinity as a library, made and run from Trinity Editor.
 
 **Lightweight first, the BRUTAL way:** nothing ships or runs that the game doesn't use. Games and the editor publish as single native executables (NativeAOT), with no .NET runtime to install. Shaders are compiled to SPIR-V at build time, so no shader compiler ships. Tools only redraw when something changes. Every dependency has to earn its place.
+
+| | |
+|---|---|
+| ![Trinity Editor with the sandbox's main scene](docs/images/trinity-editor.jpg) | ![The material test: metal, rough and glass spheres, mossy rocks and a stone floor](docs/images/trinity-materials.jpg) |
+| **Trinity Editor** with the sandbox's main scene | **The material test** (`materials`): PBR materials, glass, sky light and cascaded shadows |
 
 | Measured (17 Oct 2026), native build | Trinity Editor | Sandbox sample |
 |---|---|---|
