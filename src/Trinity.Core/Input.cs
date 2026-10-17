@@ -19,14 +19,19 @@ public sealed class Input
     readonly HashSet<GlfwMouseButton> _buttons = [], _buttonsPressed = [], _buttonsReleased = [];
     readonly HashSet<GlfwKey> _pressedFrame = [], _releasedFrame = [];
     readonly HashSet<GlfwMouseButton> _buttonsPressedFrame = [], _buttonsReleasedFrame = [];
+    // What actions see: held at this frame (a tap pressed and released between two frames counts as held
+    // for the frame it happened in) and at the last one, so a tap gives Pressed, then Released next frame
+    HashSet<GlfwKey> _keysNow = [], _keysLast = [];
+    HashSet<GlfwMouseButton> _buttonsNow = [], _buttonsLast = [];
+    readonly bool _pollGamepads = true;
     readonly List<uint> _text = [], _textFrame = [];
     readonly Dictionary<string, Binding[]> _defaults = [];
     readonly Dictionary<string, Binding[]> _actions = [];
     double2 _mouse, _lastMouse, _scroll;
 
     // Gamepad state this frame and last frame
-    readonly bool[] _pad = new bool[15], _padLast = new bool[15];
-    readonly float[] _axes = new float[6], _axesLast = new float[6];
+    readonly bool[] _pad = new bool[Binding.PadButtons], _padLast = new bool[Binding.PadButtons];
+    readonly float[] _axes = new float[Binding.PadAxes], _axesLast = new float[Binding.PadAxes];
 
     public Input(Window window)
     {
@@ -34,21 +39,32 @@ public sealed class Input
         _mouse = _lastMouse = w.CursorPos;
         w.OnKey += (_, key, _, action, _) =>
         {
-            if (action == GlfwKeyAction.Press && _keys.Add(key))
-                _keysPressed.Add(key);
-            else if (action == GlfwKeyAction.Release && _keys.Remove(key))
-                _keysReleased.Add(key);
+            if (action is GlfwKeyAction.Press or GlfwKeyAction.Release)
+                Key(key, action == GlfwKeyAction.Press);
         };
-        w.OnMouseButton += (_, button, action, _) =>
-        {
-            if (action == GlfwButtonAction.Press && _buttons.Add(button))
-                _buttonsPressed.Add(button);
-            else if (action == GlfwButtonAction.Release && _buttons.Remove(button))
-                _buttonsReleased.Add(button);
-        };
+        w.OnMouseButton += (_, button, action, _) => Button(button, action == GlfwButtonAction.Press);
         w.OnScroll += (_, offset) => _scroll += offset;
         w.OnCursorPos += (_, pos) => _mouse = pos;
         w.OnChar += (_, codepoint) => _text.Add(codepoint);
+    }
+
+    /// <summary>Input with no window, fed by <see cref="Key"/> and <see cref="Button"/> (for tests).</summary>
+    internal Input() => _pollGamepads = false;
+
+    internal void Key(GlfwKey key, bool down)
+    {
+        if (down && _keys.Add(key))
+            _keysPressed.Add(key);
+        else if (!down && _keys.Remove(key))
+            _keysReleased.Add(key);
+    }
+
+    internal void Button(GlfwMouseButton button, bool down)
+    {
+        if (down && _buttons.Add(button))
+            _buttonsPressed.Add(button);
+        else if (!down && _buttons.Remove(button))
+            _buttonsReleased.Add(button);
     }
 
     /// <summary>Mouse position in window pixels.</summary>
@@ -76,6 +92,14 @@ public sealed class Input
         Swap(_keysReleased, _releasedFrame);
         Swap(_buttonsPressed, _buttonsPressedFrame);
         Swap(_buttonsReleased, _buttonsReleasedFrame);
+        (_keysLast, _keysNow) = (_keysNow, _keysLast);
+        _keysNow.Clear();
+        _keysNow.UnionWith(_keys);
+        _keysNow.UnionWith(_pressedFrame);
+        (_buttonsLast, _buttonsNow) = (_buttonsNow, _buttonsLast);
+        _buttonsNow.Clear();
+        _buttonsNow.UnionWith(_buttons);
+        _buttonsNow.UnionWith(_buttonsPressedFrame);
         _textFrame.Clear();
         _textFrame.AddRange(_text);
         _text.Clear();
@@ -97,6 +121,8 @@ public sealed class Input
     {
         Array.Copy(_pad, _padLast, _pad.Length);
         Array.Copy(_axes, _axesLast, _axes.Length);
+        if (!_pollGamepads)
+            return;
         for (var id = 0; id < 16; id++)
         {
             if (!Glfw.JoystickIsGamepad(id) || !Glfw.GetGamepadState(id, out var state))
@@ -217,17 +243,16 @@ public sealed class Input
 
     float Current(Binding b) => b.Kind switch
     {
-        BindingKind.Key => Down((GlfwKey)b.Code) ? 1 : 0,
-        BindingKind.Mouse => Down((GlfwMouseButton)b.Code) ? 1 : 0,
+        BindingKind.Key => _keysNow.Contains((GlfwKey)b.Code) ? 1 : 0,
+        BindingKind.Mouse => _buttonsNow.Contains((GlfwMouseButton)b.Code) ? 1 : 0,
         BindingKind.Pad => _pad[b.Code] ? 1 : 0,
         _ => AxisValue(_axes, b),
     };
 
     float Previous(Binding b) => b.Kind switch
     {
-        // Down last frame = down now and not newly pressed, or released this frame
-        BindingKind.Key => (Down((GlfwKey)b.Code) && !Pressed((GlfwKey)b.Code)) || Released((GlfwKey)b.Code) ? 1 : 0,
-        BindingKind.Mouse => (Down((GlfwMouseButton)b.Code) && !Pressed((GlfwMouseButton)b.Code)) || Released((GlfwMouseButton)b.Code) ? 1 : 0,
+        BindingKind.Key => _keysLast.Contains((GlfwKey)b.Code) ? 1 : 0,
+        BindingKind.Mouse => _buttonsLast.Contains((GlfwMouseButton)b.Code) ? 1 : 0,
         BindingKind.Pad => _padLast[b.Code] ? 1 : 0,
         _ => AxisValue(_axesLast, b),
     };
@@ -300,13 +325,23 @@ public readonly record struct Binding(BindingKind Kind, int Code, float Sign = 1
             return null;
         var kind = text[..colon];
         var name = text[(colon + 1)..];
+        // Names only: Enum.TryParse also takes numbers, and an undefined one ("pad:99") would index past
+        // the gamepad state when the action is read
         return kind switch
         {
-            "key" when Enum.TryParse<GlfwKey>(name, out var k) => k,
-            "mouse" when Enum.TryParse<GlfwMouseButton>(name, out var m) => m,
-            "pad" when Enum.TryParse<GlfwGamepadButton>(name, out var p) => p,
-            "axis" when name.Length > 1 && Enum.TryParse<GlfwGamepadAxis>(name[..^1], out var a) => Axis(a, name[^1] != '-'),
+            "key" when Parse<GlfwKey>(name, int.MaxValue) is { } k => k,
+            "mouse" when Parse<GlfwMouseButton>(name, int.MaxValue) is { } m => m,
+            "pad" when Parse<GlfwGamepadButton>(name, PadButtons) is { } p => p,
+            "axis" when name.Length > 1 && name[^1] is '+' or '-' && Parse<GlfwGamepadAxis>(name[..^1], PadAxes) is { } a => Axis(a, name[^1] == '+'),
             _ => null,
         };
     }
+
+    internal const int PadButtons = 15, PadAxes = 6;
+
+    static T? Parse<T>(string name, int count) where T : struct, Enum =>
+        name.Length > 0 && !char.IsAsciiDigit(name[0]) && name[0] != '-' && Enum.TryParse<T>(name, out var v)
+            && Enum.IsDefined(v) && Convert.ToInt32(v) is var code && code >= 0 && code < count
+            ? v
+            : null;
 }

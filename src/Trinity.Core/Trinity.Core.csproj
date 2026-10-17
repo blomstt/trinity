@@ -8,4 +8,7 @@
     <PackageReference Include="Ahwoo.Brutal.Concurrency" Version="$(BrutalVersion)" />
     <PackageReference Include="Ahwoo.Brutal.Glfw" Version="2026.10.4" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Trinity.Tests" />
+  </ItemGroup>
 </Project>

@@ -87,7 +87,11 @@ public sealed unsafe class MaterialLibrary : IDisposable
     public int TextureCapacity => _capacity;
     public int TexturesLoading => _loading;
 
-    sealed record Decoded(int Handle, int Width, int Height, byte[] Rgba, bool Srgb, SamplerKey Sampler);
+    sealed record Decoded(int Handle, int Generation, int Width, int Height, byte[] Rgba, bool Srgb, SamplerKey Sampler);
+
+    // Bumped each time a texture handle is given out or released, so a decode that finishes after its
+    // handle was released (and perhaps reused for another texture) is recognised and dropped
+    readonly int[] _textureGeneration;
 
     public MaterialLibrary(GraphicsDevice gpu)
     {
@@ -95,6 +99,7 @@ public sealed unsafe class MaterialLibrary : IDisposable
         _capacity = gpu.Features.MaxTextures;
         _images = new GpuImage?[_capacity];
         _samplerOf = new VkSampler[_capacity];
+        _textureGeneration = new int[_capacity];
         var device = gpu.Device;
 
         var all = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit;
@@ -277,6 +282,7 @@ public sealed unsafe class MaterialLibrary : IDisposable
         _images[handle] = null;
         _samplerOf[handle] = _samplerOf[placeholder];
         _placeholderOf[handle] = placeholder;
+        var generation = ++_textureGeneration[handle];
         MarkDirty(handle);
         Interlocked.Increment(ref _loading);
         Task.Run(() =>
@@ -286,7 +292,7 @@ public sealed unsafe class MaterialLibrary : IDisposable
                 using var image = Stb.LoadFromMemory(encoded, desiredChannels: 4);
                 if (image.IsNull())
                     throw new InvalidDataException("not an image stb can read");
-                _decoded.Enqueue(new Decoded(handle, image.Width, image.Height, image.AsSpan().ToArray(), srgb, sampler));
+                _decoded.Enqueue(new Decoded(handle, generation, image.Width, image.Height, image.AsSpan().ToArray(), srgb, sampler));
             }
             catch (Exception e)
             {
@@ -311,6 +317,7 @@ public sealed unsafe class MaterialLibrary : IDisposable
         _images[handle] = null;
         _samplerOf[handle] = _samplerOf[White];
         _placeholderOf.Remove(handle);
+        _textureGeneration[handle]++;
         MarkDirty(handle);
         _gpu.Release(() =>
         {
@@ -397,8 +404,8 @@ public sealed unsafe class MaterialLibrary : IDisposable
     void Upload(CommandBuffer cmd, Decoded d, bool deferStaging)
     {
         Interlocked.Decrement(ref _loading);
-        if (!_placeholderOf.ContainsKey(d.Handle))
-            return; // released while it was decoding
+        if (!IsCurrent(d))
+            return; // released while it was decoding (and maybe reused for another texture since)
         var mips = (int)MathF.Floor(MathF.Log2(Math.Max(d.Width, d.Height))) + 1;
         var image = CreateImage(d.Width, d.Height, d.Srgb, mips);
         var staging = new GpuBuffer(_gpu, d.Rgba.Length, VkBufferUsageFlags.TransferSrcBit);
@@ -415,6 +422,9 @@ public sealed unsafe class MaterialLibrary : IDisposable
     }
 
     readonly List<GpuBuffer> _pendingStaging = [];
+
+    /// <summary>Whether a decoded image is still wanted: its handle hasn't been released or given to another texture since.</summary>
+    bool IsCurrent(Decoded d) => _textureGeneration[d.Handle] == d.Generation && _placeholderOf.ContainsKey(d.Handle);
 
     /// <summary>Blocks until every texture started so far is decoded and uploaded (for a load screen, or recordings).</summary>
     public void WaitForTextures()

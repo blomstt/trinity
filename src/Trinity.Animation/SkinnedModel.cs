@@ -157,6 +157,11 @@ public sealed class SkinnedModel
     (int, int) AppendMesh(GltfNode node, List<SkinnedVertex> vertices, List<uint> indices, Matrix4x4 transform, int lod = 0)
     {
         var first = indices.Count;
+        // Normals go through the inverse transpose, so they stay perpendicular to the surface under
+        // non-uniform scale. A mirrored node (negative determinant) reverses the triangles' winding and
+        // the tangent frame's handedness, as glTF requires.
+        var normalTransform = Matrix4x4.Invert(transform, out var inverse) ? Matrix4x4.Transpose(inverse) : transform;
+        var mirrored = transform.GetDeterminant() < 0;
         foreach (var prim in _doc.Meshes[node.Mesh!.Value].Primitives)
         {
             var baseVertex = vertices.Count;
@@ -180,8 +185,8 @@ public sealed class SkinnedModel
                     new SkinnedVertex
                     {
                         Position = Vector3.Transform(new Vector3(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]), transform),
-                        Normal = Vector3.Normalize(Vector3.TransformNormal(normal, transform)),
-                        Tangent = t3 == Vector3.Zero ? Vector4.Zero : new Vector4(Vector3.Normalize(t3), tangent.W < 0 ? -1 : 1),
+                        Normal = Vector3.Normalize(Vector3.TransformNormal(normal, normalTransform)),
+                        Tangent = t3 == Vector3.Zero ? Vector4.Zero : new Vector4(Vector3.Normalize(t3), (tangent.W < 0) != mirrored ? -1 : 1),
                         Uv = new Vector2(uv[v * 2], uv[v * 2 + 1]),
                         J0 = (ushort)joints[v * 4], J1 = (ushort)joints[v * 4 + 1],
                         J2 = (ushort)joints[v * 4 + 2], J3 = (ushort)joints[v * 4 + 3],
@@ -195,6 +200,9 @@ public sealed class SkinnedModel
             else
                 for (var i = 0; i < count; i++)
                     indices.Add((uint)(baseVertex + i));
+            if (mirrored)
+                for (var i = firstIndex; i + 2 < indices.Count; i += 3)
+                    (indices[i + 1], indices[i + 2]) = (indices[i + 2], indices[i + 1]);
             if (tan == null)
                 GenerateTangents(vertices, indices, baseVertex, firstIndex);
             Submeshes.Add(new Submesh(firstIndex, indices.Count - firstIndex, prim.Material ?? -1, lod));
@@ -344,11 +352,14 @@ public sealed class SkinnedModel
 
         public Vector4 Sample(float t)
         {
+            // Cubic spline keys are (in-tangent, value, out-tangent); the others are just values
             var stride = Cubic ? Width * 3 : Width;
-            var offset = Cubic ? Width : 0; // cubic spline keys are (in-tangent, value, out-tangent)
-            Vector4 At(int k) => Width == 4
-                ? new Vector4(Values[k * stride + offset], Values[k * stride + offset + 1], Values[k * stride + offset + 2], Values[k * stride + offset + 3])
-                : new Vector4(Values[k * stride + offset], Values[k * stride + offset + 1], Values[k * stride + offset + 2], 0);
+            Vector4 Read(int k, int part)
+            {
+                var o = k * stride + part * Width;
+                return new Vector4(Values[o], Values[o + 1], Values[o + 2], Width == 4 ? Values[o + 3] : 0);
+            }
+            Vector4 At(int k) => Read(k, Cubic ? 1 : 0);
             if (t <= Times[0])
                 return At(0);
             var last = Times.Length - 1;
@@ -360,7 +371,19 @@ public sealed class SkinnedModel
             k = ~k - 1;
             if (Step)
                 return At(k);
-            var f = (t - Times[k]) / (Times[k + 1] - Times[k]);
+            var dt = Times[k + 1] - Times[k];
+            var f = (t - Times[k]) / dt;
+            if (Cubic)
+            {
+                // Hermite spline (glTF 2.0, appendix C): tangents are per second, so scaled by the key interval
+                var f2 = f * f;
+                var f3 = f2 * f;
+                var v = (2 * f3 - 3 * f2 + 1) * At(k)
+                    + (f3 - 2 * f2 + f) * dt * Read(k, 2)
+                    + (-2 * f3 + 3 * f2) * At(k + 1)
+                    + (f3 - f2) * dt * Read(k + 1, 0);
+                return Width == 4 ? Vector4.Normalize(v) : v;
+            }
             if (Width != 4)
                 return Vector4.Lerp(At(k), At(k + 1), f);
             var a = At(k);
@@ -383,7 +406,10 @@ public sealed class SkinnedModel
 
         var rows = new List<Vector4>();
         var frame = 0;
-        foreach (var anim in _doc.Animations)
+        // A rigged model with no animations (exported in bind pose, say) gets a still "rest" clip of its
+        // joints at their rest transforms, so it draws as modelled rather than with an empty bone table
+        var animations = _doc.Animations.Length > 0 ? _doc.Animations : [new GltfAnimation { Name = "rest" }];
+        foreach (var anim in animations)
         {
             // Per node: translation, rotation, scale tracks (null = rest value)
             var tracks = new Dictionary<(int Node, string Path), Track>();

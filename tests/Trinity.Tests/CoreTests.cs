@@ -29,7 +29,58 @@ public class BindingTests
     [InlineData("key:NotAKey")]
     [InlineData("wheel:Up")]
     [InlineData("axis:")]
+    [InlineData("pad:99")] // numbers parse as enums, and undefined ones would index past the gamepad state
+    [InlineData("pad:3")]
+    [InlineData("axis:9+")]
+    [InlineData("axis:-1+")]
+    [InlineData("key:65")]
+    [InlineData("axis:LeftX*")]
     public void Rejects_nonsense(string text) => Assert.Null(Binding.TryParse(text));
+}
+
+public class InputTests
+{
+    static Input WithAttack()
+    {
+        var input = new Input();
+        input.Bind("attack", GlfwMouseButton.Number1, GlfwKey.Space);
+        input.BeginFrame();
+        return input;
+    }
+
+    [Fact]
+    public void A_tap_within_one_frame_is_pressed_then_released()
+    {
+        var input = WithAttack();
+        input.Button(GlfwMouseButton.Number1, true); // a touchpad tap: both in one poll
+        input.Button(GlfwMouseButton.Number1, false);
+        input.BeginFrame();
+        Assert.True(input.Pressed("attack"));
+        Assert.True(input.Down("attack"));
+        Assert.False(input.Released("attack"));
+        input.BeginFrame();
+        Assert.False(input.Pressed("attack"));
+        Assert.False(input.Down("attack"));
+        Assert.True(input.Released("attack"));
+        input.BeginFrame();
+        Assert.False(input.Released("attack"));
+    }
+
+    [Fact]
+    public void A_held_key_is_pressed_once_down_while_held_and_released_once()
+    {
+        var input = WithAttack();
+        input.Key(GlfwKey.Space, true);
+        input.BeginFrame();
+        Assert.True(input.Pressed("attack"));
+        input.BeginFrame();
+        Assert.False(input.Pressed("attack"));
+        Assert.True(input.Down("attack"));
+        input.Key(GlfwKey.Space, false);
+        input.BeginFrame();
+        Assert.True(input.Released("attack"));
+        Assert.False(input.Down("attack"));
+    }
 }
 
 public class SettingsTests : IDisposable

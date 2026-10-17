@@ -32,16 +32,25 @@ sealed class GltfFile
         if (bytes.Length >= 12 && BinaryPrimitives.ReadUInt32LittleEndian(bytes) == 0x46546C67)
         {
             json = default;
-            for (var o = 12; o + 8 <= bytes.Length;)
+            // The header's total length bounds the chunks (a file with trailing bytes is fine, a short one isn't)
+            var total = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8));
+            if (total > (uint)bytes.Length)
+                throw new InvalidDataException($"{path}: the GLB header says {total} bytes, the file has {bytes.Length}");
+            var end = (int)total;
+            for (var o = 12; o + 8 <= end;)
             {
-                var length = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(o));
+                var length = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(o));
                 var type = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(o + 4));
+                if (length > (uint)(end - o - 8))
+                    throw new InvalidDataException($"{path}: GLB chunk at byte {o} says {length} bytes, but only {end - o - 8} are left");
                 if (type == 0x4E4F534A)
-                    json = bytes.AsSpan(o + 8, length);
+                    json = bytes.AsSpan(o + 8, (int)length);
                 else if (type == 0x004E4942)
-                    bin = bytes.AsSpan(o + 8, length).ToArray();
-                o += 8 + length;
+                    bin = bytes.AsSpan(o + 8, (int)length).ToArray();
+                o += 8 + (int)length;
             }
+            if (json.IsEmpty)
+                throw new InvalidDataException($"{path}: GLB has no JSON chunk");
         }
 
         var doc = JsonSerializer.Deserialize(json, GltfJson.Default.GltfDocument)
