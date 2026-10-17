@@ -1,4 +1,5 @@
 using Brutal.GlfwApi;
+using System.Text.Json.Serialization;
 using Xunit;
 
 namespace Trinity.Tests;
@@ -48,7 +49,7 @@ public class SettingsTests : IDisposable
     [Fact]
     public void Missing_section_gives_defaults()
     {
-        var display = Settings.Load("game").Get<DisplaySettings>("display");
+        var display = Settings.Load("game").Get("display", TrinityJson.Default.DisplaySettings);
         Assert.Equal(1600, display.Width);
         Assert.True(display.VSync);
     }
@@ -57,15 +58,15 @@ public class SettingsTests : IDisposable
     public void Saves_and_loads_sections()
     {
         var s = Settings.Load("game");
-        s.Set("display", new DisplaySettings { Width = 2560, Height = 1440, Fullscreen = true });
-        s.Set("audio", new Dictionary<string, float> { ["master"] = 0.5f });
+        s.Set("display", new DisplaySettings { Width = 2560, Height = 1440, Fullscreen = true }, TrinityJson.Default.DisplaySettings);
+        s.Set("audio", new Dictionary<string, float> { ["master"] = 0.5f }, TestJson.Default.DictionaryStringSingle);
         s.Save();
 
         var again = Settings.Load("game");
-        var display = again.Get<DisplaySettings>("display");
+        var display = again.Get("display", TrinityJson.Default.DisplaySettings);
         Assert.Equal(2560, display.Width);
         Assert.True(display.Fullscreen);
-        Assert.Equal(0.5f, again.Get<Dictionary<string, float>>("audio")["master"]);
+        Assert.Equal(0.5f, again.Get("audio", TestJson.Default.DictionaryStringSingle)["master"]);
     }
 
     [Fact]
@@ -75,7 +76,7 @@ public class SettingsTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, "{ not json");
 
-        var display = Settings.Load("game").Get<DisplaySettings>("display");
+        var display = Settings.Load("game").Get("display", TrinityJson.Default.DisplaySettings);
         Assert.Equal(1600, display.Width);
         Assert.True(File.Exists(path + ".broken"));
     }
@@ -116,3 +117,6 @@ public class JobsTests
         Assert.Equal(10_000, next);
     }
 }
+
+[JsonSerializable(typeof(Dictionary<string, float>))]
+partial class TestJson : JsonSerializerContext;

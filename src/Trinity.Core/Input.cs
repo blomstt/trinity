@@ -245,7 +245,7 @@ public sealed class Input
     /// <summary>Applies the player's saved rebinds from the "bindings" settings section.</summary>
     public void LoadBindings(Settings settings)
     {
-        foreach (var (action, texts) in settings.Get<Dictionary<string, string[]>>("bindings"))
+        foreach (var (action, texts) in settings.Get("bindings", TrinityJson.Default.DictionaryStringStringArray))
         {
             var parsed = texts.Select(Binding.TryParse).Where(b => b != null).Select(b => b!.Value).ToArray();
             if (parsed.Length > 0)
@@ -255,7 +255,11 @@ public sealed class Input
 
     /// <summary>Stores rebound actions (only those that differ from the defaults) in the settings.</summary>
     public void SaveBindings(Settings settings) =>
-        settings.Set("bindings", _overridden.ToDictionary(a => a, a => _actions[a].Select(b => b.ToString()).ToArray()));
+        settings.Set(
+            "bindings",
+            _overridden.ToDictionary(a => a, a => _actions[a].Select(b => b.ToString()).ToArray()),
+            TrinityJson.Default.DictionaryStringStringArray
+        );
 }
 
 public enum BindingKind

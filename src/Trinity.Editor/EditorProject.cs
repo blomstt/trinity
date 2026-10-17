@@ -1,5 +1,6 @@
 using System.Text.Json;
 
+
 namespace Trinity.Editor;
 
 /// <summary>
@@ -9,10 +10,11 @@ namespace Trinity.Editor;
 /// </summary>
 sealed class EditorProject
 {
-    public string Name { get; init; } = "Untitled";
-    public string Game { get; init; } = "";
-    public string Assets { get; init; } = "Assets";
-    public string Scenes { get; init; } = "Scenes";
+    // set, not init: the generated JSON code would null an init property missing from the file
+    public string Name { get; set; } = "Untitled";
+    public string Game { get; set; } = "";
+    public string Assets { get; set; } = "Assets";
+    public string Scenes { get; set; } = "Scenes";
 
     public string Root { get; private set; } = "";
     public string AssetsPath => Path.Combine(Root, Assets);
@@ -24,10 +26,7 @@ sealed class EditorProject
         var file = Directory.Exists(pathOrFolder) ? Path.Combine(pathOrFolder, "trinity.json") : pathOrFolder;
         if (!File.Exists(file))
             throw new FileNotFoundException($"No trinity.json at {pathOrFolder}");
-        var project = JsonSerializer.Deserialize<EditorProject>(
-            File.ReadAllText(file),
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
-        ) ?? new EditorProject();
+        var project = JsonSerializer.Deserialize(File.ReadAllText(file), EditorJson.Default.EditorProject) ?? new EditorProject();
         project.Root = Path.GetDirectoryName(Path.GetFullPath(file))!;
         return project;
     }

@@ -81,4 +81,26 @@
     <!-- Microsoft.Extensions.* declare MIT without shipping the text -->
     <Copy SourceFiles="$(MSBuildThisFileDirectory)build/licenses/Microsoft.Extensions-LICENSE.txt" DestinationFolder="$(OutDir)licenses" SkipUnchangedFiles="true" />
   </Target>
+
+  <!-- Ship only what runs. BRUTAL's packages carry three identical copies of GLFW (the runtime loads
+       libglfw.so) and the ImGui OpenGL loader (the editor draws with Vulkan); debug symbols stay in obj/. -->
+  <PropertyGroup>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+  </PropertyGroup>
+  <Target Name="TrinitySlimPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                             Condition="'%(Extension)' == '.pdb' or '%(Filename)%(Extension)' == 'libglfw.so.3' or '%(Filename)%(Extension)' == 'libglfw.so.3.5' or '%(Filename)%(Extension)' == 'libglad.so'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="TrinityPublishLicenses" AfterTargets="Publish" Condition="'$(OutputType)' == 'Exe'">
+    <ItemGroup>
+      <_TrinityBuiltLicense Include="$(OutDir)licenses/*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_TrinityBuiltLicense)" DestinationFolder="$(PublishDir)licenses" SkipUnchangedFiles="true" />
+    <!-- Stamp the executable with the publish time (an unchanged native image keeps its old one),
+         so the trinity-editor launcher can tell a publish from a later build -->
+    <Touch Files="$(PublishDir)$(AssemblyName)" Condition="Exists('$(PublishDir)$(AssemblyName)')" />
+  </Target>
 </Project>

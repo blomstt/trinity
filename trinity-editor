@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Starts Trinity Editor. Pass a project folder, or it opens the last one.
 #   ./trinity-editor samples/Battle
-# Builds only when there's no build yet; after changing the editor, run: dotnet build src/Trinity.Editor -c Release
+# Runs the native (NativeAOT) editor if it was published after the last change under src/:
+#   dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor
+# Otherwise runs the JIT build, building it only when there's none yet; after changing the editor,
+# run: dotnet build src/Trinity.Editor -c Release (or publish again)
 here="$(dirname "$(readlink -f "$0")")"
+native="$here/artifacts/editor/trinity-editor"
 dll="$here/src/Trinity.Editor/bin/Release/net10.0/trinity-editor.dll"
-[[ -f "$dll" ]] || dotnet build "$here/src/Trinity.Editor" -c Release -nologo -v q >/dev/null || { echo "Build failed" >&2; exit 1; }
 args=()
 for a in "$@"; do
     # Project paths are made absolute; options pass through
     if [[ "$a" != --* && -e "$a" ]]; then args+=("$(readlink -f "$a")"); else args+=("$a"); fi
 done
+if [[ -x "$native" && -z "$(find "$here/src" -path '*/bin' -prune -o -path '*/obj' -prune -o -type f -newer "$native" -print -quit)" ]]; then
+    exec "$native" "${args[@]}" 2> >(grep -v 'radv is not a conformant' >&2)
+fi
+[[ -f "$dll" ]] || dotnet build "$here/src/Trinity.Editor" -c Release -nologo -v q >/dev/null || { echo "Build failed" >&2; exit 1; }
 exec dotnet "$dll" "${args[@]}" 2> >(grep -v 'radv is not a conformant' >&2)

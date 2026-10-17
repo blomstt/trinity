@@ -9,6 +9,8 @@
     <TieredPGO>true</TieredPGO>
     <!-- No ICU locale data: games format their own text -->
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Everything must run under NativeAOT: the trim and AOT analyzers flag reflection at build time -->
+    <IsAotCompatible>true</IsAotCompatible>
     <Version>0.1.0</Version>
     <Authors>blomst</Authors>
     <Product>Trinity</Product>

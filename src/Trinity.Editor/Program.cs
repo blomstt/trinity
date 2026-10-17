@@ -7,7 +7,7 @@ using Trinity.Editor;
 //   trinity-editor [path/to/project] [--screenshot out.png SECONDS]
 
 var settings = Settings.Load("trinity-editor");
-var recent = settings.Get<RecentProjects>("recent");
+var recent = settings.Get("recent", EditorJson.Default.RecentProjects);
 (string, double)? screenshot = null;
 string? path = null;
 for (var a = 0; a < args.Length; a++)
@@ -31,14 +31,9 @@ catch (Exception e)
     return 1;
 }
 recent.Last = project.Root;
-settings.Set("recent", recent);
+settings.Set("recent", recent, EditorJson.Default.RecentProjects);
 settings.Save();
 
 using var editor = new EditorApp(project) { Screenshot = screenshot };
 editor.Run();
 return 0;
-
-sealed class RecentProjects
-{
-    public string? Last { get; set; }
-}

@@ -24,16 +24,13 @@ The packages carry their own notice files, and the build copies them into `licen
 | GLFW, SDL_GameControllerDB | zlib | Ahwoo.Brutal.Glfw |
 | Dear ImGui (docking), ImGui FreeType adapter | MIT | Ahwoo.Brutal.ImGui, .ImGui.Backends |
 | Vulkan headers and registry (Khronos) | Apache-2.0, MIT | Ahwoo.Brutal.Vulkan, .Vulkan.Abstractions |
-| glTF 2.0 schemas (Khronos) | Apache-2.0 / Khronos | Ahwoo.Brutal.Gltf |
-| KTX-Software, Zstandard | Apache-2.0, BSD | Ahwoo.Brutal.Ktx |
-| GLI | MIT (dual) | Ahwoo.Brutal.Gli |
 | stb_image, stb_image_write | MIT or Unlicense | Ahwoo.Brutal.Stb |
 | glad | MIT / public domain | Ahwoo.Brutal.OpenGl |
 | Localization components | MIT | Ahwoo.Brutal.Localization |
 
 ## .NET libraries
 
-Microsoft.Extensions.* (logging, configuration, dependency injection, options, object pool) and CommunityToolkit.HighPerformance come in as BRUTAL dependencies. They're MIT-licensed, and their licence files are also copied into `licenses/`.
+Microsoft.Extensions.* (logging, configuration, dependency injection, options, object pool) and CommunityToolkit.HighPerformance come in as BRUTAL dependencies. They're MIT-licensed, and their licence files are also copied into `licenses/`. Native (NativeAOT) builds compile the .NET runtime (MIT) into the executable; its licence and third-party notices are copied into `licenses/` as well.
 
 ## Tools used at build time (not shipped)
 

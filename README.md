@@ -6,14 +6,15 @@ BRUTAL provides the foundation: C# access to native libraries, maths, unmanaged 
 
 Trinity is built for what Varendal needs, not as a general-purpose engine. The game lives in its own repository and uses Trinity as a library.
 
-**Lightweight first, the BRUTAL way:** nothing ships or runs that the game doesn't use. Shaders are compiled to SPIR-V at build time, so no shader compiler ships. Tools only redraw when something changes. Every dependency has to earn its place.
+**Lightweight first, the BRUTAL way:** nothing ships or runs that the game doesn't use. Games and the editor publish as single native executables (NativeAOT), with no .NET runtime to install. Shaders are compiled to SPIR-V at build time, so no shader compiler ships. Tools only redraw when something changes. Every dependency has to earn its place.
 
-| Measured (17 Oct 2026) | Trinity Editor | Battle sample |
+| Measured (17 Oct 2026), native build | Trinity Editor | Battle sample |
 |---|---|---|
-| On disk | 20 MB | 17 MB |
-| Start to window | 0.3 s | — |
-| Memory (empty project) | 165 MB: 87 MB of that is the Vulkan driver, 30 MB the .NET runtime, 3 MB Trinity and BRUTAL | — |
-| CPU when idle | 0% | — |
+| On disk, everything that ships | 8.3 MB (5.1 MB executable) | 6.2 MB (4.5 MB executable) + 2.2 MB assets |
+| Start to ready | 0.1 s (JIT: 0.3 s) | 0.1 s (JIT: 0.25 s) |
+| Memory | 112 MB with an empty project (JIT: 162 MB); most of it is the Vulkan driver | 207 MB peak with 4,000 soldiers (JIT: 241 MB) |
+| Threads / CPU when idle | 7 / 0% (JIT: 12) | — |
+| 64,000 soldiers, no vsync | — | about 730 fps (JIT: about 755 fps) |
 
 ## Status
 
@@ -23,7 +24,7 @@ Early. Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md). Decisions: [docs/adr/](docs/
 |---|---|---|
 | `Trinity.Core` | Window (with fullscreen), input actions for keyboard, mouse and gamepad, player settings, `Jobs.For`, logging, required credits | E1 done |
 | `Trinity.Graphics` | Vulkan device and frame loop, GPU buffers, textures, SPIR-V shader loading, pipelines, cameras and frustums, video recording | First version |
-| `Trinity.Animation` | glTF skinned models, animation baked for GPU skinning | First version, from the battle prototype |
+| `Trinity.Animation` | glTF skinned models (its own small `.glb`/`.gltf` reader), animation baked for GPU skinning | First version, from the battle prototype |
 | `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit | E1 done |
 | `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy, inspector, assets, log, stats, ▶ Play | First version |
 | `samples/Battle` | Two armies fighting: the BRUTAL battle prototype rebuilt on Trinity. 64,000 skinned soldiers at about 190 fps | Runs |
@@ -42,10 +43,19 @@ dotnet run -c Release --project samples/Battle
 dotnet test tests/Trinity.Tests
 ```
 
+`dotnet build` and `dotnet run` use the JIT, for quick iteration. To ship, publish native (needs `clang`):
+
+```bash
+dotnet publish samples/Battle -c Release -r linux-x64 -o artifacts/battle
+```
+
+The folder holds the executable, the few native libraries it loads, `Shaders/`, assets, `NOTICE.txt` and `licenses/`. Nothing else is needed on the player's machine besides a Vulkan driver. Every Trinity project is checked for NativeAOT at build time (`IsAotCompatible`), so reflection-based code is flagged as a warning while you write it. JSON goes through source-generated contexts (`[JsonSerializable]`), never reflection.
+
 ## Trinity Editor
 
 ```bash
 ./trinity-editor samples/Battle      # or any folder with a trinity.json; with no argument it reopens the last project
+dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor   # the native editor, which ./trinity-editor then prefers
 # It's also in the app launcher (rofi) as "Trinity Editor", via ~/.local/share/applications/trinity-editor.desktop
 ```
 
@@ -97,7 +107,7 @@ sealed class MyGame : Game
 }
 ```
 
-- **Settings** live in `~/.config/<AppName>/settings.json`. The engine applies the `display` section (size, fullscreen, vsync) at start and saves it on exit. Games read and write their own sections with `Settings.Get<T>("audio")` and `Settings.Set(...)`.
+- **Settings** live in `~/.config/<AppName>/settings.json`. The engine applies the `display` section (size, fullscreen, vsync) at start and saves it on exit. Games read and write their own sections with `Settings.Get("audio", MyJson.Default.AudioSettings)` and `Settings.Set("audio", value, MyJson.Default.AudioSettings)`, where `MyJson` is the game's `[JsonSerializable(typeof(AudioSettings))] partial class MyJson : JsonSerializerContext`.
 - **Rebinding:** `Input.Rebind(action, ...)` changes an action, and the change is saved with the settings. Only rebound actions are stored, so changing a game's defaults still reaches players who never rebound that action.
 - **F11** toggles fullscreen in every Trinity game.
 - **Recording:** `RecordPath` in the options renders off screen at a fixed 60 fps and writes an H.264 video. `RecordSplash` puts the logo at the start.

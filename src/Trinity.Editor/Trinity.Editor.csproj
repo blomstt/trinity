@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <!-- dotnet publish -r linux-x64 makes one native executable; build and run stay JIT for fast iteration -->
+    <PublishAot>true</PublishAot>
     <AssemblyName>trinity-editor</AssemblyName>
     <RootNamespace>Trinity.Editor</RootNamespace>
     <Description>Trinity Editor: viewport, scene hierarchy, inspector, assets, log, and Play.</Description>

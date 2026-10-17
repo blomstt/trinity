@@ -1,7 +1,5 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
-using Brutal.GltfApi;
-using GltfNode = Brutal.GltfApi.Node;
 
 namespace Trinity.Animation;
 
@@ -23,7 +21,7 @@ public readonly record struct BakedClip(string Name, int FirstFrame, int FrameCo
 /// bone matrices: frame f, joint j lives at (f * JointCount + j). The GPU skins soldiers from that table,
 /// so playing an animation costs one lookup per bone and nothing on the CPU.
 ///
-/// Reads BRUTAL's glTF document directly. A rigged model needs mesh nodes named *LOD0 (and
+/// Reads glTF with <see cref="GltfFile"/>. A rigged model needs mesh nodes named *LOD0 (and
 /// optionally *LOD1) sharing one skin. Any other glTF loads as a static model: every mesh, placed by
 /// its node transforms, drawn with one still "bone" and a one-frame "static" clip, so the same
 /// shaders draw both kinds. Materials give base colours; textures arrive with the renderer (E2).
@@ -40,17 +38,16 @@ public sealed class SkinnedModel
     /// <summary>Each bone matrix as three float4 rows of the 3x4 affine transform.</summary>
     public Vector4[] BoneRows = [];
 
-    readonly GltfLoader _gltf;
-    readonly Gltf _doc;
+    readonly GltfFile _gltf;
+    readonly GltfDocument _doc;
 
     /// <summary>False for static models (no skeleton).</summary>
     public bool IsRigged { get; private set; }
 
     public SkinnedModel(string path)
     {
-        using var loader = new GltfLoader(path);
-        _gltf = loader;
-        _doc = loader.GltfJson;
+        _gltf = GltfFile.Load(path);
+        _doc = _gltf.Doc;
 
         var vertices = new List<SkinnedVertex>();
         var indices = new List<uint>();
@@ -88,7 +85,7 @@ public sealed class SkinnedModel
         var parent = new int[_doc.Nodes.Length];
         Array.Fill(parent, -1);
         for (var n = 0; n < _doc.Nodes.Length; n++)
-            foreach (var c in _doc.Nodes[n].Children ?? [])
+            foreach (var c in _doc.Nodes[n].Children)
                 parent[c] = n;
         return parent;
     }
@@ -96,13 +93,11 @@ public sealed class SkinnedModel
     Matrix4x4 RestGlobal(int n, int[] parent)
     {
         var node = _doc.Nodes[n];
-        var local = node.ShouldSerializeMatrix()
-            ? ColumnMajor(
-                [node.Matrix.M11, node.Matrix.M21, node.Matrix.M31, node.Matrix.M41, node.Matrix.M12, node.Matrix.M22, node.Matrix.M32, node.Matrix.M42,
-                 node.Matrix.M13, node.Matrix.M23, node.Matrix.M33, node.Matrix.M43, node.Matrix.M14, node.Matrix.M24, node.Matrix.M34, node.Matrix.M44], 0)
-            : Matrix4x4.CreateScale(node.Scale.X, node.Scale.Y, node.Scale.Z)
-                * Matrix4x4.CreateFromQuaternion(new Quaternion(node.Rotation.X, node.Rotation.Y, node.Rotation.Z, node.Rotation.W))
-                * Matrix4x4.CreateTranslation(node.Translation.X, node.Translation.Y, node.Translation.Z);
+        var local = node.Matrix is { Length: 16 } matrix
+            ? ColumnMajor(matrix, 0)
+            : Matrix4x4.CreateScale(node.Scale[0], node.Scale[1], node.Scale[2])
+                * Matrix4x4.CreateFromQuaternion(new Quaternion(node.Rotation[0], node.Rotation[1], node.Rotation[2], node.Rotation[3]))
+                * Matrix4x4.CreateTranslation(node.Translation[0], node.Translation[1], node.Translation[2]);
         return parent[n] >= 0 ? local * RestGlobal(parent[n], parent) : local;
     }
 
@@ -127,9 +122,8 @@ public sealed class SkinnedModel
             if (prim.Material is { } m)
             {
                 var mat = _doc.Materials[m];
-                var f = mat.PbrMetallicRoughness?.BaseColorFactor;
-                if (f is { } c)
-                    color = new Vector4(c.X, c.Y, c.Z, 1);
+                if (mat.PbrMetallicRoughness?.BaseColorFactor is [var r, var g, var b, ..])
+                    color = new Vector4(r, g, b, 1);
                 team = (mat.Name ?? "").StartsWith("Team", StringComparison.OrdinalIgnoreCase);
             }
             var packed = PackColor(color, team);
@@ -172,21 +166,21 @@ public sealed class SkinnedModel
     float[] ReadFloats(int accessorIndex)
     {
         var acc = _doc.Accessors[accessorIndex];
-        var view = _doc.BufferViews[acc.BufferView!.Value];
-        var bytes = _gltf.GetBufferView(acc.BufferView.Value);
+        var view = _doc.BufferViews[acc.BufferView ?? throw new NotSupportedException("accessor without a buffer view")];
+        var bytes = _gltf.BufferView(acc.BufferView.Value);
         var comps = acc.Type switch
         {
-            Accessor.TypeEnum.Scalar => 1,
-            Accessor.TypeEnum.Vec2 => 2,
-            Accessor.TypeEnum.Vec3 => 3,
-            Accessor.TypeEnum.Vec4 => 4,
-            Accessor.TypeEnum.Mat4 => 16,
-            _ => throw new NotSupportedException(acc.Type.ToString()),
+            "SCALAR" => 1,
+            "VEC2" => 2,
+            "VEC3" => 3,
+            "VEC4" => 4,
+            "MAT4" => 16,
+            _ => throw new NotSupportedException(acc.Type),
         };
         var size = acc.ComponentType switch
         {
-            Accessor.ComponentTypeEnum.Byte or Accessor.ComponentTypeEnum.UnsignedByte => 1,
-            Accessor.ComponentTypeEnum.Short or Accessor.ComponentTypeEnum.UnsignedShort => 2,
+            Byte or UnsignedByte => 1,
+            Short or UnsignedShort => 2,
             _ => 4,
         };
         var stride = view.ByteStride ?? comps * size;
@@ -197,26 +191,28 @@ public sealed class SkinnedModel
             var o = acc.ByteOffset + e * stride + c * size;
             float v = acc.ComponentType switch
             {
-                Accessor.ComponentTypeEnum.Float => BitConverter.ToSingle(bytes.Slice(o, 4)),
-                Accessor.ComponentTypeEnum.UnsignedInt => BitConverter.ToUInt32(bytes.Slice(o, 4)),
-                Accessor.ComponentTypeEnum.UnsignedShort => BitConverter.ToUInt16(bytes.Slice(o, 2)),
-                Accessor.ComponentTypeEnum.Short => BitConverter.ToInt16(bytes.Slice(o, 2)),
-                Accessor.ComponentTypeEnum.UnsignedByte => bytes[o],
+                Float => BitConverter.ToSingle(bytes.Slice(o, 4)),
+                UnsignedInt => BitConverter.ToUInt32(bytes.Slice(o, 4)),
+                UnsignedShort => BitConverter.ToUInt16(bytes.Slice(o, 2)),
+                Short => BitConverter.ToInt16(bytes.Slice(o, 2)),
+                UnsignedByte => bytes[o],
                 _ => (sbyte)bytes[o],
             };
             if (acc.Normalized)
                 v /= acc.ComponentType switch
                 {
-                    Accessor.ComponentTypeEnum.UnsignedByte => 255f,
-                    Accessor.ComponentTypeEnum.Byte => 127f,
-                    Accessor.ComponentTypeEnum.UnsignedShort => 65535f,
-                    Accessor.ComponentTypeEnum.Short => 32767f,
+                    UnsignedByte => 255f,
+                    Byte => 127f,
+                    UnsignedShort => 65535f,
+                    Short => 32767f,
                     _ => 1f,
                 };
             result[e * comps + c] = v;
         }
         return result;
     }
+
+    const int Byte = 5120, UnsignedByte = 5121, Short = 5122, UnsignedShort = 5123, UnsignedInt = 5125, Float = 5126;
 
     // --- Baking ---------------------------------------------------------------------------------
 
@@ -255,7 +251,7 @@ public sealed class SkinnedModel
         }
     }
 
-    void Bake(Skin skin)
+    void Bake(GltfSkin skin)
     {
         var joints = skin.Joints;
         JointCount = joints.Length;
@@ -264,31 +260,27 @@ public sealed class SkinnedModel
         for (var j = 0; j < JointCount; j++)
             inverseBind[j] = ibm is null ? Matrix4x4.Identity : ColumnMajor(ibm, j * 16);
 
-        var parent = new int[_doc.Nodes.Length];
-        Array.Fill(parent, -1);
-        for (var n = 0; n < _doc.Nodes.Length; n++)
-            foreach (var c in _doc.Nodes[n].Children ?? [])
-                parent[c] = n;
+        var parent = ParentTable();
 
         var rows = new List<Vector4>();
         var frame = 0;
-        foreach (var anim in _doc.Animations ?? [])
+        foreach (var anim in _doc.Animations)
         {
             // Per node: translation, rotation, scale tracks (null = rest value)
-            var tracks = new Dictionary<(int Node, AnimationChannelTarget.PathEnum Path), Track>();
+            var tracks = new Dictionary<(int Node, string Path), Track>();
             float duration = 0;
             foreach (var ch in anim.Channels)
             {
-                if (ch.Target.Node is not { } node || ch.Target.Path == AnimationChannelTarget.PathEnum.Weights)
+                if (ch.Target.Node is not { } node || ch.Target.Path is not ("translation" or "rotation" or "scale"))
                     continue;
                 var sampler = anim.Samplers[ch.Sampler];
                 var track = new Track
                 {
                     Times = ReadFloats(sampler.Input),
                     Values = ReadFloats(sampler.Output),
-                    Width = ch.Target.Path == AnimationChannelTarget.PathEnum.Rotation ? 4 : 3,
-                    Step = sampler.Interpolation == AnimationSampler.InterpolationEnum.Step,
-                    Cubic = sampler.Interpolation == AnimationSampler.InterpolationEnum.Cubicspline,
+                    Width = ch.Target.Path == "rotation" ? 4 : 3,
+                    Step = sampler.Interpolation == "STEP",
+                    Cubic = sampler.Interpolation == "CUBICSPLINE",
                 };
                 tracks[(node, ch.Target.Path)] = track;
                 duration = MathF.Max(duration, track.Times[^1]);
@@ -307,12 +299,12 @@ public sealed class SkinnedModel
                     if (done[n])
                         return global[n];
                     var node = _doc.Nodes[n];
-                    var tr = tracks.TryGetValue((n, AnimationChannelTarget.PathEnum.Translation), out var tt)
-                        ? tt.Sample(t) : new Vector4(node.Translation.X, node.Translation.Y, node.Translation.Z, 0);
-                    var ro = tracks.TryGetValue((n, AnimationChannelTarget.PathEnum.Rotation), out var rt)
-                        ? rt.Sample(t) : new Vector4(node.Rotation.X, node.Rotation.Y, node.Rotation.Z, node.Rotation.W);
-                    var sc = tracks.TryGetValue((n, AnimationChannelTarget.PathEnum.Scale), out var st)
-                        ? st.Sample(t) : new Vector4(node.Scale.X, node.Scale.Y, node.Scale.Z, 0);
+                    var tr = tracks.TryGetValue((n, "translation"), out var tt)
+                        ? tt.Sample(t) : new Vector4(node.Translation[0], node.Translation[1], node.Translation[2], 0);
+                    var ro = tracks.TryGetValue((n, "rotation"), out var rt)
+                        ? rt.Sample(t) : new Vector4(node.Rotation[0], node.Rotation[1], node.Rotation[2], node.Rotation[3]);
+                    var sc = tracks.TryGetValue((n, "scale"), out var st)
+                        ? st.Sample(t) : new Vector4(node.Scale[0], node.Scale[1], node.Scale[2], 0);
                     var local = Matrix4x4.CreateScale(sc.X, sc.Y, sc.Z)
                         * Matrix4x4.CreateFromQuaternion(Quaternion.Normalize(new Quaternion(ro.X, ro.Y, ro.Z, ro.W)))
                         * Matrix4x4.CreateTranslation(tr.X, tr.Y, tr.Z);

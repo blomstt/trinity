@@ -33,12 +33,6 @@ sealed class SceneObject
 /// </summary>
 sealed class EditorScene
 {
-    static readonly JsonSerializerOptions Json = new()
-    {
-        WriteIndented = true,
-        Converters = { new Vector3Converter() },
-    };
-
     public List<SceneObject> Objects { get; set; } = [];
 
     [JsonIgnore]
@@ -49,7 +43,7 @@ sealed class EditorScene
 
     public static EditorScene Load(string path)
     {
-        var scene = JsonSerializer.Deserialize<EditorScene>(File.ReadAllText(path), Json) ?? new EditorScene();
+        var scene = JsonSerializer.Deserialize(File.ReadAllText(path), EditorJson.Default.EditorScene) ?? new EditorScene();
         scene.Path = path;
         return scene;
     }
@@ -57,21 +51,8 @@ sealed class EditorScene
     public void Save(string path)
     {
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, JsonSerializer.Serialize(this, Json));
+        File.WriteAllText(path, JsonSerializer.Serialize(this, EditorJson.Default.EditorScene));
         Path = path;
         Dirty = false;
-    }
-
-    /// <summary>Vectors as [x, y, z] arrays, which read better in scene files.</summary>
-    sealed class Vector3Converter : JsonConverter<Vector3>
-    {
-        public override Vector3 Read(ref Utf8JsonReader reader, Type type, JsonSerializerOptions options)
-        {
-            var v = JsonSerializer.Deserialize<float[]>(ref reader, options) ?? [];
-            return v.Length == 3 ? new Vector3(v[0], v[1], v[2]) : Vector3.Zero;
-        }
-
-        public override void Write(Utf8JsonWriter writer, Vector3 value, JsonSerializerOptions options) =>
-            JsonSerializer.Serialize(writer, new[] { value.X, value.Y, value.Z }, options);
     }
 }

@@ -67,7 +67,7 @@ public sealed class Engine : IDisposable
         Options = options;
         var appName = options.AppName ?? Slug(options.Title);
         Settings = Settings.Load(appName);
-        var display = Settings.Get<DisplaySettings>("display");
+        var display = Settings.Get("display", TrinityJson.Default.DisplaySettings);
 
         Window = new Window(options.Title, options.Width ?? display.Width, options.Height ?? display.Height, appName);
         if (display.Fullscreen && !Recording && options.Width == null)
@@ -192,12 +192,12 @@ public sealed class Engine : IDisposable
     {
         if (Recording || Options.Width != null || Options.VSync != null)
             return;
-        var display = Settings.Get<DisplaySettings>("display");
+        var display = Settings.Get("display", TrinityJson.Default.DisplaySettings);
         display.Fullscreen = Window.Fullscreen;
         if (!Window.Fullscreen)
             (display.Width, display.Height) = (Window.Size.X, Window.Size.Y);
         display.VSync = Gpu.VSync;
-        Settings.Set("display", display);
+        Settings.Set("display", display, TrinityJson.Default.DisplaySettings);
         Input.SaveBindings(Settings);
         Settings.Save();
     }

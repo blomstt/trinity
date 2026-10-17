@@ -1,0 +1,170 @@
+using System.Buffers.Binary;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Trinity.Animation;
+
+/// <summary>
+/// A glTF 2.0 file, <c>.glb</c> or <c>.gltf</c> (with <c>.bin</c> files or base64 <c>data:</c> buffers),
+/// reduced to the parts Trinity reads. The JSON is parsed with build-time generated code, so it works
+/// under NativeAOT. Data is raw: no axis or unit conversion.
+/// </summary>
+sealed class GltfFile
+{
+    public readonly GltfDocument Doc;
+    readonly byte[][] _buffers;
+
+    GltfFile(GltfDocument doc, byte[][] buffers)
+    {
+        Doc = doc;
+        _buffers = buffers;
+    }
+
+    public static GltfFile Load(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        ReadOnlySpan<byte> json = bytes;
+        byte[]? bin = null;
+
+        // GLB: 12-byte header, then chunks of (length, type, data); JSON first, then an optional BIN
+        if (bytes.Length >= 12 && BinaryPrimitives.ReadUInt32LittleEndian(bytes) == 0x46546C67)
+        {
+            json = default;
+            for (var o = 12; o + 8 <= bytes.Length;)
+            {
+                var length = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(o));
+                var type = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(o + 4));
+                if (type == 0x4E4F534A)
+                    json = bytes.AsSpan(o + 8, length);
+                else if (type == 0x004E4942)
+                    bin = bytes.AsSpan(o + 8, length).ToArray();
+                o += 8 + length;
+            }
+        }
+
+        var doc = JsonSerializer.Deserialize(json, GltfJson.Default.GltfDocument)
+            ?? throw new InvalidDataException($"{path} is not a glTF file");
+        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        var buffers = doc.Buffers.Select(b => b.Uri switch
+        {
+            null => bin ?? throw new InvalidDataException($"{path} has no binary chunk"),
+            var uri when uri.StartsWith("data:", StringComparison.Ordinal) => Convert.FromBase64String(uri[(uri.IndexOf(',') + 1)..]),
+            var uri => File.ReadAllBytes(Path.Combine(folder, Uri.UnescapeDataString(uri))),
+        }).ToArray();
+        return new GltfFile(doc, buffers);
+    }
+
+    public ReadOnlySpan<byte> BufferView(int index)
+    {
+        var view = Doc.BufferViews[index];
+        return _buffers[view.Buffer].AsSpan(view.ByteOffset, view.ByteLength);
+    }
+}
+
+// The glTF schema, only the fields Trinity uses; anything else in the file is skipped
+
+sealed class GltfDocument
+{
+    public GltfAccessor[] Accessors { get; set; } = [];
+    public GltfBufferView[] BufferViews { get; set; } = [];
+    public GltfBuffer[] Buffers { get; set; } = [];
+    public GltfNode[] Nodes { get; set; } = [];
+    public GltfMesh[] Meshes { get; set; } = [];
+    public GltfSkin[] Skins { get; set; } = [];
+    public GltfAnimation[] Animations { get; set; } = [];
+    public GltfMaterial[] Materials { get; set; } = [];
+}
+
+sealed class GltfAccessor
+{
+    public int? BufferView { get; set; }
+    public int ByteOffset { get; set; }
+    public int ComponentType { get; set; } // 5120 byte, 5121 ubyte, 5122 short, 5123 ushort, 5125 uint, 5126 float
+    public bool Normalized { get; set; }
+    public int Count { get; set; }
+    public string Type { get; set; } = "SCALAR";
+}
+
+sealed class GltfBufferView
+{
+    public int Buffer { get; set; }
+    public int ByteOffset { get; set; }
+    public int ByteLength { get; set; }
+    public int? ByteStride { get; set; }
+}
+
+sealed class GltfBuffer
+{
+    public string? Uri { get; set; }
+}
+
+sealed class GltfNode
+{
+    public string? Name { get; set; }
+    public int? Mesh { get; set; }
+    public int? Skin { get; set; }
+    public int[] Children { get; set; } = [];
+    public float[]? Matrix { get; set; } // column-major
+    public float[] Translation { get; set; } = [0, 0, 0];
+    public float[] Rotation { get; set; } = [0, 0, 0, 1];
+    public float[] Scale { get; set; } = [1, 1, 1];
+}
+
+sealed class GltfMesh
+{
+    public GltfPrimitive[] Primitives { get; set; } = [];
+}
+
+sealed class GltfPrimitive
+{
+    public Dictionary<string, int> Attributes { get; set; } = [];
+    public int? Indices { get; set; }
+    public int? Material { get; set; }
+}
+
+sealed class GltfSkin
+{
+    public int[] Joints { get; set; } = [];
+    public int? InverseBindMatrices { get; set; }
+}
+
+sealed class GltfAnimation
+{
+    public string? Name { get; set; }
+    public GltfChannel[] Channels { get; set; } = [];
+    public GltfSampler[] Samplers { get; set; } = [];
+}
+
+sealed class GltfChannel
+{
+    public int Sampler { get; set; }
+    public GltfTarget Target { get; set; } = new();
+}
+
+sealed class GltfTarget
+{
+    public int? Node { get; set; }
+    public string Path { get; set; } = ""; // translation, rotation, scale or weights
+}
+
+sealed class GltfSampler
+{
+    public int Input { get; set; }
+    public int Output { get; set; }
+    public string Interpolation { get; set; } = "LINEAR"; // or STEP, CUBICSPLINE
+}
+
+sealed class GltfMaterial
+{
+    public string? Name { get; set; }
+    public GltfPbr? PbrMetallicRoughness { get; set; }
+}
+
+sealed class GltfPbr
+{
+    public float[] BaseColorFactor { get; set; } = [1, 1, 1, 1];
+}
+
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(GltfDocument))]
+sealed partial class GltfJson : JsonSerializerContext;
