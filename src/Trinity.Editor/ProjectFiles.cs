@@ -210,6 +210,44 @@ static class ProjectFiles
         return ext.Length == 0 || Path.GetExtension(typed).Length > 0 ? typed : typed + ext;
     }
 
+    /// <summary>A path in <paramref name="folder"/> that isn't taken: "rock.glb", then "rock_1.glb" and so on.</summary>
+    public static string FreeName(string root, string folder, string name)
+    {
+        var ext = name.EndsWith(".scene.json", StringComparison.Ordinal) ? ".scene.json" : Path.GetExtension(name);
+        var stem = name[..^ext.Length];
+        var candidate = name;
+        string Rel(string n) => folder.Length == 0 ? n : folder + "/" + n;
+        for (var i = 1; File.Exists(Path.Combine(root, Rel(candidate))) || Directory.Exists(Path.Combine(root, Rel(candidate))); i++)
+            candidate = $"{stem}_{i}{ext}";
+        return Rel(candidate);
+    }
+
+    /// <summary>
+    /// Creates what a name asks for in <paramref name="folder"/>: a folder for a name
+    /// ending in "/", an empty scene for ".scene.json", otherwise an empty file. Names may hold folders
+    /// ("models/rock/" makes both). Returns the project-relative path.
+    /// </summary>
+    public static string Create(string root, string folder, string name)
+    {
+        if (name.Contains('\\') || name.StartsWith('/') || name.Split('/').Any(part => part is "." or ".."))
+            throw new IOException($"{name} isn't a name this can create");
+        var path = (folder.Length == 0 ? "" : folder + "/") + name.TrimEnd('/');
+        var full = Path.Combine(root, path);
+        if (File.Exists(full) || Directory.Exists(full))
+            throw new IOException($"{path} already exists");
+        if (name.EndsWith('/'))
+            Directory.CreateDirectory(full);
+        else
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            if (name.EndsWith(".scene.json", StringComparison.Ordinal))
+                new SceneLibrary(root).Save(path, new SceneDocument());
+            else
+                File.WriteAllText(full, "");
+        }
+        return path;
+    }
+
     /// <summary>Copies a file, or a folder and everything in it (leaving out build output).</summary>
     public static void Copy(string from, string to)
     {

@@ -5,18 +5,19 @@ using Trinity.Editor;
 // without one it opens the Project Manager. File > Quit to Project List goes back to it.
 //
 //   trinity-editor [path/to/project] [--scene Scenes/x.scene.json] [--open Scripts/Spin.cs[:LINE]] [--select NODE]
-//                  [--screenshot out.png SECONDS]
+//                  [--browse Assets/props] [--screenshot out.png SECONDS]
 
 var settings = Settings.Load("trinity-editor");
 // The Trinity this editor belongs to: games it builds and runs use it (see ProjectTemplate.UseEngine)
 ProjectTemplate.Current = ProjectTemplate.EngineRoot(settings);
 (string, double)? screenshot = null;
-string? path = null, open = null, select = null, sceneFile = null;
+string? path = null, open = null, select = null, sceneFile = null, browse = null;
 for (var a = 0; a < args.Length; a++)
     if (args[a] == "--screenshot") screenshot = (Path.GetFullPath(args[++a]), double.Parse(args[++a]));
     else if (args[a] == "--open") open = args[++a];
     else if (args[a] == "--select") select = args[++a];
     else if (args[a] == "--scene") sceneFile = args[++a];
+    else if (args[a] == "--browse") browse = args[++a];
     else path = args[a];
 
 EditorProject? project = null;
@@ -60,6 +61,8 @@ while (true)
                 editor.OpenScript(open);
             if (select != null)
                 editor.Select(select);
+            if (browse != null)
+                editor.Browse(browse);
         }
         editor.Run();
         back = editor.BackToProjects;

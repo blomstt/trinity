@@ -38,6 +38,8 @@ enum Icon
     Import,
     History,
     Sort,
+    Up,
+    Save,
 }
 
 /// <summary>
@@ -256,6 +258,14 @@ static class Icons
                 dl.AddLine(P(0.5f, 0.06f), P(0.5f, 0.66f), c, t * 1.6f);
                 dl.AddPolyline([P(0.26f, 0.44f), P(0.5f, 0.68f), P(0.74f, 0.44f)], c, default, t * 1.6f);
                 dl.AddPolyline([P(0.1f, 0.62f), P(0.1f, 0.92f), P(0.9f, 0.92f), P(0.9f, 0.62f)], c, default, t * 1.4f);
+                break;
+            case Icon.Up:
+                dl.AddPolyline([P(0.12f, 0.66f), P(0.5f, 0.28f), P(0.88f, 0.66f)], c, default, t * 1.6f);
+                break;
+            case Icon.Save:
+                dl.AddRect(P(0.1f, 0.1f), P(0.9f, 0.9f), c, s * 0.08f, default, t * 1.3f);
+                dl.AddRectFilled(P(0.28f, 0.1f), P(0.72f, 0.36f), c);
+                dl.AddRectFilled(P(0.24f, 0.56f), P(0.76f, 0.9f), c, s * 0.04f);
                 break;
             case Icon.Sort:
                 dl.AddLine(P(0.1f, 0.22f), P(0.9f, 0.22f), c, t * 1.5f);

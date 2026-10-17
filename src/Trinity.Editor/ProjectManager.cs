@@ -797,15 +797,27 @@ sealed class FolderPicker
 {
     string _current = "/";
     readonly ImInputString _path = new(1024);
-    bool _wantProject;
+    bool _wantProject, _pickFiles;
     public string Title { get; private set; } = "";
+
+    /// <summary>Files ticked in file mode (<see cref="StartFiles"/>), for importing.</summary>
+    public readonly HashSet<string> Files = [];
 
     public void Start(string title, string folder, bool wantProject)
     {
         Title = title;
         _wantProject = wantProject;
+        _pickFiles = false;
         _current = Directory.Exists(folder) ? Path.GetFullPath(folder) : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         _path.SetValue(_current.AsSpan());
+    }
+
+    /// <summary>File mode: files can be ticked (any number, from any folder); the result is "files" when they're chosen.</summary>
+    public void StartFiles(string title, string folder)
+    {
+        Start(title, folder, wantProject: false);
+        _pickFiles = true;
+        Files.Clear();
     }
 
     /// <summary>The browser inside an already-open modal. Returns the chosen folder, "" if cancelled, or null while choosing.</summary>
@@ -853,11 +865,38 @@ sealed class FolderPicker
         foreach (var f in files)
         {
             var (icon, color) = Icons.ForFile(f);
+            if (_pickFiles)
+            {
+                var ticked = Files.Contains(f);
+                if (ImGui.Checkbox("##" + f, ref ticked))
+                {
+                    if (ticked) Files.Add(f);
+                    else Files.Remove(f);
+                }
+                ImGui.SameLine();
+            }
             Icons.Inline(icon, color);
             ImGui.SameLine();
-            ImGui.TextDisabled(Path.GetFileName(f));
+            if (_pickFiles)
+            {
+                if (ImGui.Selectable(Path.GetFileName(f), Files.Contains(f)) && !Files.Remove(f))
+                    Files.Add(f);
+            }
+            else
+                ImGui.TextDisabled(Path.GetFileName(f));
         }
         ImGui.EndChild();
+        if (_pickFiles)
+        {
+            ImGui.BeginDisabled(Files.Count == 0);
+            if (ImGui.Button(Files.Count == 0 ? "Tick the files to import" : $"Import {Files.Count} file{(Files.Count == 1 ? "" : "s")}", new float2(220, 0)))
+                chosen = "files";
+            ImGui.EndDisabled();
+            ImGui.SameLine(ImGui.GetWindowWidth() - 126);
+            if (ImGui.Button("Cancel", new float2(110, 0)) || ImGui.IsKeyPressed(ImGuiKey.Escape))
+                return "";
+            return chosen;
+        }
         var here = _wantProject ? File.Exists(EditorProject.FileIn(_current)) : true;
         ImGui.BeginDisabled(!here);
         if (ImGui.Button(_wantProject ? "Import this folder" : "Use this folder", new float2(180, 0)))
