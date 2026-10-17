@@ -1,7 +1,7 @@
-"""Builds the stand-in spearman as a rigged, animated glTF, the same shape of file a Meshy or
-Tripo auto-rigged character exports as, so a real soldier can replace it later.
+"""Builds a simple test character as a rigged, animated glTF (idle, walk, attack, death), the same
+shape of file an auto-rigged character exports as, for exercising skinning and animation.
 
-    blender --background --factory-startup --python tools/make_soldier.py -- Assets/soldier.glb [previews_dir]
+    blender --background --factory-startup --python tools/make_character.py -- Assets/character.glb [previews_dir]
 
 Blender's axes: Z up, the character faces -Y. The glTF exporter turns that into Y up, facing +Z.
 """
@@ -12,7 +12,7 @@ import bpy
 from mathutils import Vector
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
-OUT = argv[0] if argv else "soldier.glb"
+OUT = argv[0] if argv else "character.glb"
 PREVIEWS = argv[1] if len(argv) > 1 else None
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -84,7 +84,7 @@ for side, s in (("L", 1), ("R", -1)):
 names = list(JOINTS)
 mesh = bpy.data.meshes.new("Body")
 mesh.from_pydata([JOINTS[n][0] for n in names], [(names.index(a), names.index(b)) for a, b in EDGES], [])
-body = bpy.data.objects.new("Soldier_LOD0", mesh)
+body = bpy.data.objects.new("Character_LOD0", mesh)
 scene.collection.objects.link(body)
 skin = body.modifiers.new("Skin", "SKIN")
 for i, n in enumerate(names):
@@ -98,12 +98,11 @@ for m in list(body.modifiers):
 bpy.ops.object.shade_smooth()
 
 
-def material(name, rgb, team=False):
+def material(name, rgb):
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     m.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (*rgb, 1)
     m.diffuse_color = (*rgb, 1)
-    m["team"] = 1 if team else 0  # the loader tints these with the army colour
     return m
 
 
@@ -114,11 +113,11 @@ def srgb(c):
 MATS = {
     "Skin": material("Skin", srgb((0.62, 0.47, 0.38))),
     "Cloth": material("Cloth", srgb((0.20, 0.17, 0.14))),
-    "Tabard": material("Team_Tabard", srgb((0.75, 0.75, 0.75)), team=True),
+    "Tabard": material("Tabard", srgb((0.33, 0.42, 0.60))),
     "Iron": material("Iron", srgb((0.40, 0.41, 0.43))),
     "Wood": material("Wood", srgb((0.30, 0.20, 0.11))),
     "Leather": material("Leather", srgb((0.24, 0.16, 0.09))),
-    "Shield": material("Team_Shield", srgb((0.85, 0.85, 0.85)), team=True),
+    "Shield": material("Shield", srgb((0.36, 0.45, 0.62))),
 }
 for m in MATS.values():
     mesh.materials.append(m)
@@ -181,7 +180,7 @@ bpy.ops.object.join()  # keeps every vertex group, so the gear follows its bone
 # Far-away version: same rig, about a quarter of the triangles
 lod1 = body.copy()
 lod1.data = body.data.copy()
-lod1.name = "Soldier_LOD1"
+lod1.name = "Character_LOD1"
 scene.collection.objects.link(lod1)
 dec = lod1.modifiers.new("Decimate", "DECIMATE")
 dec.ratio = 0.22

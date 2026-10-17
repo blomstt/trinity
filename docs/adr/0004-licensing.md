@@ -1,4 +1,4 @@
-# 6. Licensing: PolyForm Noncommercial, commercial licences on request
+# 4. Licensing: PolyForm Noncommercial, commercial licences on request
 
 Date: 2026-10-17. Status: accepted.
 

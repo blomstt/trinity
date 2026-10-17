@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Starts Trinity Editor. Pass a project folder, or it opens the last one.
-#   ./trinity-editor samples/Battle
+#   ./trinity-editor samples/Sandbox
 # Runs the native (NativeAOT) editor if it was published after the last change under src/:
 #   dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor
 # Otherwise runs the JIT build, building it only when there's none yet; after changing the editor,

@@ -1,20 +1,19 @@
 # Trinity
 
-The game engine for **Varendal: Age of Kings**, built on [BRUTAL](https://github.com/ahwootech/BRUTAL).
+A lightweight C# game engine built on [BRUTAL](https://github.com/ahwootech/BRUTAL).
 
 BRUTAL provides the foundation: C# access to native libraries, maths, unmanaged memory, jobs, and bindings for Vulkan, GLFW, Jolt, FMOD/OpenAL, FreeType and Dear ImGui. Trinity is everything a game needs above that: a renderer, scenes, animation, terrain, physics integration, navigation, a game UI system, audio, data and saves, and editor tools.
 
-Trinity is built for what Varendal needs, not as a general-purpose engine. The game lives in its own repository and uses Trinity as a library.
+A game is its own C# project that uses Trinity as a library, made and run from Trinity Editor.
 
 **Lightweight first, the BRUTAL way:** nothing ships or runs that the game doesn't use. Games and the editor publish as single native executables (NativeAOT), with no .NET runtime to install. Shaders are compiled to SPIR-V at build time, so no shader compiler ships. Tools only redraw when something changes. Every dependency has to earn its place.
 
-| Measured (17 Oct 2026), native build | Trinity Editor | Battle sample |
+| Measured (17 Oct 2026), native build | Trinity Editor | Sandbox sample |
 |---|---|---|
-| On disk, everything that ships | 8.3 MB (5.1 MB executable) | 6.2 MB (4.5 MB executable) + 2.2 MB assets |
+| On disk, everything that ships | 8.8 MB (5.5 MB executable) | 6.7 MB (4.7 MB executable, 0.3 MB assets) |
 | Start to ready | 0.1 s (JIT: 0.3 s) | 0.1 s (JIT: 0.25 s) |
-| Memory | 112 MB with an empty project (JIT: 162 MB); most of it is the Vulkan driver | 207 MB peak with 4,000 soldiers (JIT: 241 MB) |
+| Memory | 112 MB with an empty project (JIT: 162 MB); most of it is the Vulkan driver | 145 MB peak (JIT: 174 MB) |
 | Threads / CPU when idle | 7 / 0% (JIT: 12) | — |
-| 64,000 soldiers, no vsync | — | about 730 fps (JIT: about 755 fps) |
 
 ## Status
 
@@ -24,11 +23,10 @@ Early. Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md). Decisions: [docs/adr/](docs/
 |---|---|---|
 | `Trinity.Core` | Window (with fullscreen), input actions for keyboard, mouse and gamepad, player settings, `Jobs.For`, logging, required credits | E1 done |
 | `Trinity.Graphics` | Vulkan device and frame loop, GPU buffers, textures, SPIR-V shader loading, pipelines, cameras and frustums, video recording | First version |
-| `Trinity.Animation` | glTF skinned models (its own small `.glb`/`.gltf` reader), animation baked for GPU skinning | First version, from the battle prototype |
+| `Trinity.Animation` | glTF skinned models (its own small `.glb`/`.gltf` reader), animation baked for GPU skinning | First version |
 | `Trinity` | `Engine.Run(game)`: the BRUTAL splash, then a loop of `FixedUpdate` (60 Hz) / `Update` / `Render`, settings saved on exit. `Trinity.Scenes`: scene files, C# scripts on nodes, `SceneRenderer`, `SceneGame` | E1 done; scenes and scripts first version |
 | `Trinity.Generators` | Build-time only: registers a game's scripts and their Inspector fields, so scripts need no reflection (NativeAOT) | First version |
 | `Trinity.Editor` | **Trinity Editor**: viewport, hierarchy, inspector, assets, log, stats, a C# script editor, ▶ Play with hot reload | First version |
-| `samples/Battle` | Two armies fighting: the BRUTAL battle prototype rebuilt on Trinity. 64,000 skinned soldiers at about 190 fps | Runs |
 | `samples/Sandbox` | A scene made in the editor, brought to life by four small scripts: the scripting example | Runs |
 | `tests/Trinity.Tests` | Unit tests for the core, scenes and scripting | 24 passing |
 
@@ -41,14 +39,14 @@ GLSL files in a project's `Shaders/` folder (`.vert`, `.frag`, `.comp`) are comp
 Needs the .NET 10 SDK, a Vulkan 1.3 GPU, and `glslc` for shaders (Arch: `shaderc`). BRUTAL comes from nuget.org as the official `Ahwoo.Brutal.*` packages. Linux only for now.
 
 ```bash
-dotnet run -c Release --project samples/Battle
+dotnet run -c Release --project samples/Sandbox
 dotnet test tests/Trinity.Tests
 ```
 
 `dotnet build` and `dotnet run` use the JIT, for quick iteration. To ship, publish native (needs `clang`):
 
 ```bash
-dotnet publish samples/Battle -c Release -r linux-x64 -o artifacts/battle
+dotnet publish samples/Sandbox -c Release -r linux-x64 -o artifacts/sandbox
 ```
 
 The folder holds the executable, the few native libraries it loads, `Shaders/`, assets, `NOTICE.txt` and `licenses/`. Nothing else is needed on the player's machine besides a Vulkan driver. Every Trinity project is checked for NativeAOT at build time (`IsAotCompatible`), so reflection-based code is flagged as a warning while you write it. JSON goes through source-generated contexts (`[JsonSerializable]`), never reflection.
@@ -56,7 +54,7 @@ The folder holds the executable, the few native libraries it loads, `Shaders/`, 
 ## Trinity Editor
 
 ```bash
-./trinity-editor samples/Battle      # or any folder with a trinity.json; with no argument it reopens the last project
+./trinity-editor samples/Sandbox     # or any folder with a trinity.json; with no argument it reopens the last project
 dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor   # the native editor, which ./trinity-editor then prefers
 # It's also in the app launcher (rofi) as "Trinity Editor", via ~/.local/share/applications/trinity-editor.desktop
 ```
@@ -64,7 +62,7 @@ dotnet publish src/Trinity.Editor -c Release -r linux-x64 -o artifacts/editor   
 A project is a folder with a `trinity.json`:
 
 ```json
-{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }
+{ "name": "My game", "game": "src/MyGame/MyGame.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }
 ```
 
 | Panel | What it does |
@@ -109,7 +107,7 @@ public sealed class Spin : Script
 ## Making a game
 
 ```csharp
-Engine.Run(new MyGame(), new EngineOptions { Title = "Varendal", AppName = "varendal" });
+Engine.Run(new MyGame(), new EngineOptions { Title = "My game", AppName = "my-game" });
 
 sealed class MyGame : Game
 {

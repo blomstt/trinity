@@ -1,10 +1,10 @@
-# 8. C# scripts on scene nodes, edited in Trinity Editor
+# 6. C# scripts on scene nodes, edited in Trinity Editor
 
 Date: 2026-10-17. Status: accepted.
 
 ## Context
 
-blomst wants a script editor like Godot's, running C#. Godot attaches a script to a node, shows its exported fields in the Inspector, and edits code in a built-in editor. Trinity has constraints Godot doesn't: games and the editor ship as NativeAOT executables (ADR 0007), which can't load code at runtime or create types by reflection, and everything has to stay light.
+blomst wants a script editor like Godot's, running C#. Godot attaches a script to a node, shows its exported fields in the Inspector, and edits code in a built-in editor. Trinity has constraints Godot doesn't: games and the editor ship as NativeAOT executables (ADR 0005), which can't load code at runtime or create types by reflection, and everything has to stay light.
 
 ## Decision
 

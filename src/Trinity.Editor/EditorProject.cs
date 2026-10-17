@@ -5,7 +5,7 @@ namespace Trinity.Editor;
 
 /// <summary>
 /// A game the editor works on, described by a <c>trinity.json</c> at the game's root:
-/// <code>{ "name": "Varendal", "game": "src/Varendal/Varendal.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }</code>
+/// <code>{ "name": "My game", "game": "src/MyGame/MyGame.csproj", "assets": "Assets", "scenes": "Scenes", "scripts": "Scripts" }</code>
 /// Paths are relative to the file.
 /// </summary>
 sealed class EditorProject

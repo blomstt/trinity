@@ -1,3 +1,3 @@
 # Credits
 
-- `Assets/soldier.glb`: the battle sample's spearman, made by `samples/Battle/tools/make_soldier.py` (see `samples/Battle/CREDITS.md`).
+- `Assets/character.glb`: a test character made by `tools/make_character.py` (run with Blender), part of this repository.

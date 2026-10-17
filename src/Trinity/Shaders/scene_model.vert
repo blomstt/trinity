@@ -10,7 +10,7 @@ layout(location = 0) in vec3 inPos;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in uvec4 inJoints;
 layout(location = 3) in vec4 inWeights;
-layout(location = 4) in vec4 inColorTeam;
+layout(location = 4) in vec4 inColor; // sRGB
 
 layout(location = 5) in vec4 inRow0; // object transform, 3x4
 layout(location = 6) in vec4 inRow1;
@@ -39,9 +39,7 @@ void main() {
     outNormal = vec4(n, 0.0) * place;
     outWorld = world;
 
-    // Army colour shows as a neutral steel blue until a game sets its own
-    vec3 base = pow(inColorTeam.rgb, vec3(2.2));
-    outColor = inColorTeam.a > 0.5 ? pow(vec3(0.28, 0.36, 0.52), vec3(2.2)) * base * 1.6 : base;
+    outColor = pow(inColor.rgb, vec3(2.2));
     outSelected = inAnim.w;
     gl_Position = frame.viewProj * vec4(world, 1.0);
 }

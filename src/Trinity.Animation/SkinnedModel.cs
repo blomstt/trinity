@@ -10,7 +10,7 @@ public struct SkinnedVertex
     public Vector3 Normal;
     public ushort J0, J1, J2, J3; // joint indices into the skin
     public Vector4 Weights;
-    public uint ColorTeam; // RGBA8: base colour (sRGB), A = 255 where the army colour applies
+    public uint Color; // RGBA8: base colour (sRGB)
 }
 
 /// <summary>Where one baked clip sits in the bone-matrix table.</summary>
@@ -18,7 +18,7 @@ public readonly record struct BakedClip(string Name, int FirstFrame, int FrameCo
 
 /// <summary>
 /// A skinned character from a glTF file, with every animation baked at a fixed rate into one table of
-/// bone matrices: frame f, joint j lives at (f * JointCount + j). The GPU skins soldiers from that table,
+/// bone matrices: frame f, joint j lives at (f * JointCount + j). The GPU skins characters from that table,
 /// so playing an animation costs one lookup per bone and nothing on the CPU.
 ///
 /// Reads glTF with <see cref="GltfFile"/>. A rigged model needs mesh nodes named *LOD0 (and
@@ -116,17 +116,15 @@ public sealed class SkinnedModel
             var joints = prim.Attributes.TryGetValue("JOINTS_0", out var j) ? ReadFloats(j) : new float[count * 4];
             var weights = prim.Attributes.TryGetValue("WEIGHTS_0", out var w0) ? ReadFloats(w0) : new float[count * 4];
 
-            // Colour from the material; materials named Team_* take the army colour instead
+            // Colour from the material
             var color = Vector4.One;
-            var team = false;
             if (prim.Material is { } m)
             {
                 var mat = _doc.Materials[m];
                 if (mat.PbrMetallicRoughness?.BaseColorFactor is [var r, var g, var b, ..])
                     color = new Vector4(r, g, b, 1);
-                team = (mat.Name ?? "").StartsWith("Team", StringComparison.OrdinalIgnoreCase);
             }
-            var packed = PackColor(color, team);
+            var packed = PackColor(color);
 
             for (var v = 0; v < pos.Length / 3; v++)
             {
@@ -140,7 +138,7 @@ public sealed class SkinnedModel
                         J0 = (ushort)joints[v * 4], J1 = (ushort)joints[v * 4 + 1],
                         J2 = (ushort)joints[v * 4 + 2], J3 = (ushort)joints[v * 4 + 3],
                         Weights = sum > 0 ? w / sum : new Vector4(1, 0, 0, 0),
-                        ColorTeam = packed,
+                        Color = packed,
                     }
                 );
             }
@@ -154,12 +152,12 @@ public sealed class SkinnedModel
         return (first, indices.Count - first);
     }
 
-    static uint PackColor(Vector4 linear, bool team)
+    static uint PackColor(Vector4 linear)
     {
         // glTF base colours are linear; store sRGB bytes so the shader can unpack and linearise once
         static uint Srgb(float c) =>
             (uint)Math.Clamp(MathF.Round(255 * (c <= 0.0031308f ? c * 12.92f : 1.055f * MathF.Pow(c, 1 / 2.4f) - 0.055f)), 0, 255);
-        return Srgb(linear.X) | Srgb(linear.Y) << 8 | Srgb(linear.Z) << 16 | (team ? 255u : 0u) << 24;
+        return Srgb(linear.X) | Srgb(linear.Y) << 8 | Srgb(linear.Z) << 16 | 255u << 24;
     }
 
     /// <summary>Reads any accessor as floats, following the byte stride and component type.</summary>

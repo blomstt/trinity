@@ -59,7 +59,7 @@ sealed unsafe class ImGuiHost : IDisposable
         );
     }
 
-    /// <summary>Dark, with Varendal's bronze as the accent.</summary>
+    /// <summary>Dark, with bronze as the accent.</summary>
     static void Theme()
     {
         ImGui.StyleColorsDark();

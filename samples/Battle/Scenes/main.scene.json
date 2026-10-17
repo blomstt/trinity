@@ -1,9 +1,0 @@
-{
-  "Objects": [
-    { "Name": "Spearman idle", "Model": "Assets/soldier.glb", "Position": [-2.4, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "idle", "Speed": 1, "Playing": true },
-    { "Name": "Spearman walk", "Model": "Assets/soldier.glb", "Position": [-0.8, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "walk", "Speed": 1, "Playing": true },
-    { "Name": "Spearman attack", "Model": "Assets/soldier.glb", "Position": [0.8, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "attack", "Speed": 1, "Playing": true },
-    { "Name": "Spearman death", "Model": "Assets/soldier.glb", "Position": [2.4, 0, 0], "Rotation": [0, 0, 0], "Scale": 1, "Clip": "death", "Speed": 0.5, "Playing": true },
-    { "Name": "Mossy rocks", "Model": "Assets/props/rock_moss_set_01/rock_moss_set_01.gltf", "Position": [0, 0, -3.5], "Rotation": [0, 30, 0], "Scale": 1, "Clip": "", "Speed": 1, "Playing": false }
-  ]
-}

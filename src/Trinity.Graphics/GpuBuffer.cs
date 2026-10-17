@@ -6,7 +6,7 @@ namespace Trinity.Graphics;
 
 /// <summary>
 /// A buffer in host-visible, coherent memory that stays mapped for its whole life, so the CPU
-/// writes straight into it (the simulation writes soldier instances here with no extra copy).
+/// writes straight into it (a simulation can write instance data here with no extra copy).
 /// </summary>
 public sealed unsafe class GpuBuffer : IDisposable
 {
