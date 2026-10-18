@@ -185,7 +185,7 @@ static class ProjectFiles
         var home = Path.Combine(dataHome, "Trash");
         try
         {
-            if (trash != home && OperatingSystem.IsLinux())
+            if (trash != home && !OperatingSystem.IsWindows())
                 Directory.CreateDirectory(trash, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); // only the user's, as the spec asks
             Directory.CreateDirectory(Path.Combine(trash, "files"));
             Directory.CreateDirectory(Path.Combine(trash, "info"));

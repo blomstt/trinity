@@ -68,6 +68,7 @@ sealed unsafe class HeadlessDock : IDisposable
         io.DeltaTime = 1f / 60;
         io.BackendFlags |= ImGuiBackendFlags.RendererHasTextures; // nothing uploads the font atlas; that's fine here
         io.ConfigErrorRecoveryEnableAssert = false; // a test that throws mid-frame mustn't abort the test run
+        io.ConfigMacOSXBehaviors = false; // pins Linux key semantics: on macOS ImGui swaps Ctrl and Cmd, so Mod_Ctrl would never reach io.KeyCtrl
         io.Fonts.AddFontDefault();
         _log = (level, _, message) => { lock (Logged) Logged.Add($"{level}: {message}"); };
         Log.Written += _log;
