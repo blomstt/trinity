@@ -171,17 +171,44 @@ static class ProjectFiles
         var data = Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } x
             ? x
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
-        var files = Path.Combine(data, "Trash", "files");
-        var info = Path.Combine(data, "Trash", "info");
-        Directory.CreateDirectory(files);
-        Directory.CreateDirectory(info);
+        var mounts = File.Exists("/proc/self/mounts") ? File.ReadAllText("/proc/self/mounts") : "";
+        return Trash(fullPath, data, mounts, UserId());
+    }
+
+    /// <summary>
+    /// <see cref="Trash(string)"/> with what it reads from the system passed in (for tests): the user's data
+    /// folder, the mount table and the user id.
+    /// </summary>
+    internal static string Trash(string fullPath, string dataHome, string mounts, string uid)
+    {
+        var (trash, pathInInfo) = TrashFor(Path.GetFullPath(fullPath), dataHome, mounts, uid);
+        var home = Path.Combine(dataHome, "Trash");
+        try
+        {
+            if (trash != home && !OperatingSystem.IsWindows())
+                Directory.CreateDirectory(trash, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); // only the user's, as the spec asks
+            Directory.CreateDirectory(Path.Combine(trash, "files"));
+            Directory.CreateDirectory(Path.Combine(trash, "info"));
+        }
+        catch (Exception e) when (trash != home && e is UnauthorizedAccessException or IOException)
+        {
+            // The drive's top can't be written to (a root-owned /mnt/data): a file can still go to the user's
+            // own trash, since a file move copies across drives; a folder move can't
+            if (Directory.Exists(fullPath))
+                throw new IOException($"the drive's trash, {trash}, can't be made ({e.Message}), and a folder can't be moved to another drive's trash", e);
+            (trash, pathInInfo) = (home, Path.GetFullPath(fullPath));
+            Directory.CreateDirectory(Path.Combine(trash, "files"));
+            Directory.CreateDirectory(Path.Combine(trash, "info"));
+        }
+        var files = Path.Combine(trash, "files");
+        var info = Path.Combine(trash, "info");
         var name = Path.GetFileName(fullPath.TrimEnd('/'));
         var unique = name;
         for (var i = 2; File.Exists(Path.Combine(files, unique)) || Directory.Exists(Path.Combine(files, unique)) || File.Exists(Path.Combine(info, unique + ".trashinfo")); i++)
             unique = $"{Path.GetFileNameWithoutExtension(name)}.{i}{Path.GetExtension(name)}";
         // The info file first, as the spec asks, so a crash between the two leaves nothing unaccounted for
         File.WriteAllText(Path.Combine(info, unique + ".trashinfo"),
-            $"[Trash Info]\nPath={Uri.EscapeDataString(fullPath).Replace("%2F", "/")}\nDeletionDate={DateTime.Now:yyyy-MM-ddTHH:mm:ss}\n");
+            $"[Trash Info]\nPath={Uri.EscapeDataString(pathInInfo).Replace("%2F", "/")}\nDeletionDate={DateTime.Now:yyyy-MM-ddTHH:mm:ss}\n");
         var target = Path.Combine(files, unique);
         try
         {
@@ -190,12 +217,57 @@ static class ProjectFiles
             else
                 File.Move(fullPath, target);
         }
-        catch
+        catch (Exception e)
         {
             File.Delete(Path.Combine(info, unique + ".trashinfo"));
-            throw;
+            throw new IOException($"couldn't move it into {trash}: {e.Message}", e);
         }
         return target;
+    }
+
+    /// <summary>
+    /// Which trash a file goes to, as the freedesktop.org spec says: the user's own (in their data folder)
+    /// for files on the same drive, otherwise that drive's own, $topdir/.Trash-$uid, since a move can't
+    /// cross drives. Returns the trash folder and the path its .trashinfo records (relative to the drive's
+    /// top for a drive's own trash).
+    /// </summary>
+    internal static (string Trash, string PathInInfo) TrashFor(string fullPath, string dataHome, string mounts, string uid)
+    {
+        var drive = MountPointOf(fullPath, mounts);
+        if (drive == MountPointOf(Path.GetFullPath(dataHome), mounts))
+            return (Path.Combine(dataHome, "Trash"), fullPath);
+        return (Path.Combine(drive, ".Trash-" + uid), Path.GetRelativePath(drive, fullPath));
+    }
+
+    /// <summary>The mount point a path is on: the longest one in the mount table (/proc/self/mounts) that contains it.</summary>
+    internal static string MountPointOf(string path, string mounts)
+    {
+        var best = "/";
+        foreach (var line in mounts.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var fields = line.Split(' ');
+            if (fields.Length < 2)
+                continue;
+            // Spaces and other awkward characters are written as octal escapes (\040)
+            var point = System.Text.RegularExpressions.Regex.Replace(fields[1], @"\\([0-7]{3})", m => ((char)Convert.ToInt32(m.Groups[1].Value, 8)).ToString());
+            var inside = point == "/" || path == point || path.StartsWith(point.TrimEnd('/') + "/", StringComparison.Ordinal);
+            if (inside && point.Length > best.Length)
+                best = point;
+        }
+        return best;
+    }
+
+    /// <summary>The user's id, for a drive's own trash folder (from /proc, so no native call is needed).</summary>
+    static string UserId()
+    {
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/self/status"))
+                if (line.StartsWith("Uid:", StringComparison.Ordinal))
+                    return line.Split('\t', ' ', StringSplitOptions.RemoveEmptyEntries)[1];
+        }
+        catch (IOException) { }
+        return Environment.UserName;
     }
 
     /// <summary>
@@ -208,6 +280,48 @@ static class ProjectFiles
             return typed.EndsWith(".scene.json", StringComparison.Ordinal) ? typed : typed.TrimEnd('.') + ".scene.json";
         var ext = Path.GetExtension(original);
         return ext.Length == 0 || Path.GetExtension(typed).Length > 0 ? typed : typed + ext;
+    }
+
+    /// <summary>A path in <paramref name="folder"/> that isn't taken: "rock.glb", then "rock_1.glb" and so on.</summary>
+    public static string FreeName(string root, string folder, string name)
+    {
+        string Rel(string n) => folder.Length == 0 ? n : folder + "/" + n;
+        // A folder's name (v1.2) or a dotfile's (.gitignore) has no extension to keep at the end
+        var ext = Directory.Exists(Path.Combine(root, Rel(name))) ? ""
+            : name.EndsWith(".scene.json", StringComparison.Ordinal) ? ".scene.json" : Path.GetExtension(name);
+        if (ext.Length == name.Length)
+            ext = "";
+        var stem = name[..^ext.Length];
+        var candidate = name;
+        for (var i = 1; File.Exists(Path.Combine(root, Rel(candidate))) || Directory.Exists(Path.Combine(root, Rel(candidate))); i++)
+            candidate = $"{stem}_{i}{ext}";
+        return Rel(candidate);
+    }
+
+    /// <summary>
+    /// Creates what a name asks for in <paramref name="folder"/>: a folder for a name
+    /// ending in "/", an empty scene for ".scene.json", otherwise an empty file. Names may hold folders
+    /// ("models/rock/" makes both). Returns the project-relative path.
+    /// </summary>
+    public static string Create(string root, string folder, string name)
+    {
+        if (name.Contains('\\') || name.StartsWith('/') || name.Split('/').Any(part => part is "." or ".."))
+            throw new IOException($"{name} isn't a name this can create");
+        var path = (folder.Length == 0 ? "" : folder + "/") + name.TrimEnd('/');
+        var full = Path.Combine(root, path);
+        if (File.Exists(full) || Directory.Exists(full))
+            throw new IOException($"{path} already exists");
+        if (name.EndsWith('/'))
+            Directory.CreateDirectory(full);
+        else
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            if (name.EndsWith(".scene.json", StringComparison.Ordinal))
+                new SceneLibrary(root).Save(path, new SceneDocument());
+            else
+                File.WriteAllText(full, "");
+        }
+        return path;
     }
 
     /// <summary>Copies a file, or a folder and everything in it (leaving out build output).</summary>

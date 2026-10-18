@@ -687,7 +687,11 @@ public sealed unsafe class GraphicsDevice : IDisposable
     /// <summary>Blocks until the GPU has finished everything submitted so far.</summary>
     public void WaitIdle() => Device.WaitIdle();
 
-    public void Dispose()
+    /// <summary>
+    /// Waits for the GPU, then runs every <see cref="Release"/> queued, now: at shutdown, before disposing
+    /// what those releases use (the UI that owns a texture's descriptor, say).
+    /// </summary>
+    public void FlushReleases()
     {
         Device.WaitIdle();
         // Releasing one thing can queue the release of another (a texture frees its image): drain until empty
@@ -696,6 +700,11 @@ public sealed unsafe class GraphicsDevice : IDisposable
             RunReleases(0);
             RunReleases(1);
         }
+    }
+
+    public void Dispose()
+    {
+        FlushReleases();
         SavePipelineCache();
         Device.DestroyPipelineCache(PipelineCache, null);
         DestroySwapchainResources(destroySwapchain: true);

@@ -586,7 +586,7 @@ sealed class CodeEditor
 
     static ImColor8 C(float r, float g, float b, float a = 1) => (ImColor8)ImGuiHost.Color(r, g, b, a);
 
-    static readonly ImColor8[] TokenColors =
+    internal static readonly ImColor8[] TokenColors =
     [
         C(0.86f, 0.87f, 0.89f), // plain
         C(1.00f, 0.47f, 0.55f), // keyword
