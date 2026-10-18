@@ -4,6 +4,7 @@ using System.Text;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using Brutal.StbApi;
+using Trinity.Animation;
 using Trinity.Editor.Scripting;
 using Trinity.Graphics;
 using Trinity.Scenes;
@@ -49,7 +50,8 @@ sealed partial class EditorApp
     FsKind _fsKind = FsKind.All;
     float _fsTileSize = 72;
     bool _fsReverse, _fsShowHidden, _fsShowPreview = true, _fsScrollToCursor = true, _fsFocused, _fsFocusSearch;
-    int _fsAnchor, _fsColumns = 1; // where a Shift-selection starts; tiles per row
+    string _fsAnchor = ""; // the item a Shift-selection starts from
+    int _fsColumns = 1; // tiles per row
     readonly ImInputString _fsSearch = new(128), _fsPathSearch = new(128);
     FsInput _fsInput;
     bool _fsInputOpen, _fsBookmarksOpen, _fsImportOpen, _fsViewLoaded;
@@ -211,11 +213,16 @@ sealed partial class EditorApp
         _fsScrollToCursor = true;
         if (extend)
         {
-            // Shift: a range, from where it started to here
-            if (_fsSelected.Count == 0)
-                _fsAnchor = before;
+            // Shift: a range, from where it started to here; from the current item if nothing is selected,
+            // or if a search or the filter now hides where it started
+            var from = _fsSelected.Count > 0 ? entries.FindIndex(e => e.Path == _fsAnchor) : -1;
+            if (from < 0)
+            {
+                from = before;
+                _fsAnchor = entries[before].Path;
+            }
             _fsSelected.Clear();
-            for (var i = Math.Min(_fsAnchor, index); i <= Math.Max(_fsAnchor, index); i++)
+            for (var i = Math.Min(from, index); i <= Math.Max(from, index); i++)
                 _fsSelected.Add(entries[i].Path);
         }
     }
@@ -287,6 +294,9 @@ sealed partial class EditorApp
             _fsDir = ""; // its folder was moved or deleted
 
         var entries = Visible(_fsDir);
+        // The selection is of what shows: an item a search, the filter or the relist hides leaves it
+        if (_fsSelected.Count > 0)
+            _fsSelected.IntersectWith(entries.Select(e => e.Path));
         if (_fsFocused && _fsInput == FsInput.None && !ImGui.GetIO().WantTextInput && !ImGui.IsPopupOpen("", ImGuiPopupFlags.AnyPopupId))
         {
             FsKeys(entries);
@@ -516,7 +526,7 @@ sealed partial class EditorApp
             {
                 NewItems();
                 if (ImGui.MenuItem("Import files...")) StartImport();
-                if (ImGui.MenuItem("Paste", "Ctrl+V", false, _fsYank != null)) Paste();
+                if (ImGui.MenuItem("Paste", "Ctrl+V", false, _fsYank != null)) Paste(_fsDir);
                 ImGui.EndPopup();
             }
         }
@@ -524,12 +534,14 @@ sealed partial class EditorApp
         ImGui.EndGroup();
     }
 
-    /// <summary>Handles a click on an item: plain selects it alone, Ctrl adds or removes it, Shift selects the range to it; a double-click opens it.</summary>
+    /// <summary>Handles a click on an item (<paramref name="click"/> 1): plain selects it alone, Ctrl adds or removes it, Shift selects the range to it; a double-click (2) opens it.</summary>
     void Clicked(List<FsEntry> entries, int index, int click)
     {
         var io = ImGui.GetIO();
         var e = entries[index];
-        if (io.KeyShift)
+        if (click == 2)
+            Open(e); // the first click already selected it
+        else if (io.KeyShift)
             SetCursor(entries, index, extend: true);
         else if (io.KeyCtrl)
         {
@@ -539,16 +551,14 @@ sealed partial class EditorApp
             if (!_fsSelected.Remove(e.Path))
                 _fsSelected.Add(e.Path);
             _fsCursorIn[_fsDir] = e.Path;
-            _fsAnchor = index;
+            _fsAnchor = e.Path;
         }
         else
         {
             _fsSelected.Clear();
             _fsCursorIn[_fsDir] = e.Path;
-            _fsAnchor = index;
+            _fsAnchor = e.Path;
         }
-        if (click == 2)
-            Open(e);
     }
 
     void Tiles(List<FsEntry> entries, int cursorIndex, bool searching)
@@ -582,17 +592,18 @@ sealed partial class EditorApp
             if (current)
                 dl.AddRect(p, end, ImGui.GetColorU32(Accent), 6, default, 2);
 
-            // The picture: a thumbnail for images, otherwise the kind's icon
+            // The picture: a thumbnail for images, otherwise the kind's icon (also while it decodes, or
+            // if it can't). Only tiles on screen ask for one, so a big folder doesn't decode them all.
             var art = new float2(p.X + 12, p.Y + 8);
             var artEnd = new float2(art.X + _fsTileSize, art.Y + _fsTileSize);
-            if (IsImage(e.Name) && Thumbnail(e, 160) is { } thumb)
+            if (IsImage(e.Name) && ImGui.IsItemVisible() && Thumbnail(e, 160) is { Texture: { } tex, Ref: { } texRef })
             {
-                var (tw, th) = (thumb.Texture!.Width, thumb.Texture.Height);
+                var (tw, th) = (tex.Width, tex.Height);
                 var scale = Math.Min(_fsTileSize / tw, _fsTileSize / th);
                 var w = tw * scale;
                 var h = th * scale;
                 var at = new float2(art.X + (_fsTileSize - w) / 2, art.Y + (_fsTileSize - h) / 2);
-                dl.AddImageRounded(thumb.Ref!.Value, at, new float2(at.X + w, at.Y + h), float2.Zero, float2.One, ImGui.GetColorU32(ImGuiHost.Color(1, 1, 1)), 4);
+                dl.AddImageRounded(texRef, at, new float2(at.X + w, at.Y + h), float2.Zero, float2.One, ImGui.GetColorU32(ImGuiHost.Color(1, 1, 1)), 4);
             }
             else
             {
@@ -617,8 +628,11 @@ sealed partial class EditorApp
                 ImGui.SetTooltip(searching ? $"{e.Path}\n{KindLabel(e)}{(e.Folder ? "" : ", " + FormatSize(e.Size))}" : $"{e.Name}\n{KindLabel(e)}{(e.Folder ? "" : ", " + FormatSize(e.Size))}");
 
             ItemInteractions(e, IconFor(e));
+            // The button reports a click when the mouse is let go; a double-click shows on the second press
             if (clicked)
-                Clicked(entries, i, ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) ? 2 : 1);
+                Clicked(entries, i, 1);
+            if (hovered && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                Clicked(entries, i, 2);
             if (current && _fsScrollToCursor)
             {
                 _fsScrollToCursor = false;
@@ -673,7 +687,10 @@ sealed partial class EditorApp
         {
             ImGui.SameLine(x);
             if (ImGui.SmallButton(label + (_fsSort == sort ? (_fsReverse ? " v" : " ^") : "")))
+            {
                 (_fsSort, _fsReverse) = (sort, _fsSort == sort && !_fsReverse);
+                SaveView();
+            }
         }
         if (width > 420)
         {
@@ -717,7 +734,9 @@ sealed partial class EditorApp
             YankMarker(dl, e, new float2(p.X + 3, p.Y + h / 2));
             ItemInteractions(e, (icon, color));
             if (clicked)
-                Clicked(entries, i, ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) ? 2 : 1);
+                Clicked(entries, i, 1);
+            if (hovered && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                Clicked(entries, i, 2);
             ImGui.PopID();
         }
         ImGui.PopStyleVar();
@@ -946,7 +965,7 @@ sealed partial class EditorApp
                 var (doc, problems) = SceneLibrary.Parse(File.ReadAllText(_project.Absolute(e.Path)), e.Path);
                 cached = (e.Modified, doc, problems.Ok ? "" : problems.Errors.FirstOrDefault() ?? "");
             }
-            catch (IOException ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 cached = (e.Modified, null, ex.Message);
             }
@@ -979,19 +998,43 @@ sealed partial class EditorApp
         }
     }
 
+    // Models: read on a worker thread for their numbers only; nothing goes to the GPU until one is placed
+    sealed record ModelFacts(int Triangles, int Vertices, int Materials, int Textures, bool Rigged, int Bones, int FarTriangles, BakedClip[] Clips)
+    {
+        public static ModelFacts Of(SkinnedModel m) => new(
+            m.Submeshes.Where(s => s.Lod == 0).Sum(s => s.IndexCount) / 3, m.Vertices.Length, m.Materials.Count, m.Textures.Count,
+            m.IsRigged, m.JointCount, m.Lod1.IndexCount / 3, [.. m.Clips]);
+    }
+
+    readonly Dictionary<string, (DateTime Stamp, Task<ModelFacts> Reading)> _modelPreviews = [];
+
     void ModelPreview(FsEntry e)
     {
-        if (_view.Model(e.Path) is not { } model)
+        if (!_modelPreviews.TryGetValue(e.Path, out var cached) || cached.Stamp != e.Modified)
+        {
+            if (_modelPreviews.Count > 16)
+                _modelPreviews.Clear();
+            var file = _project.Absolute(e.Path);
+            cached = (e.Modified, InTurn(() => ModelFacts.Of(new SkinnedModel(file))));
+            cached.Reading.ContinueWith(_ => PreviewReady());
+            _modelPreviews[e.Path] = cached;
+        }
+        if (!cached.Reading.IsCompleted)
         {
             ImGui.TextDisabled("loading...");
             return;
         }
-        var m = model.Model;
-        ImGui.Text($"{model.Triangles:N0} triangles, {m.Vertices.Length:N0} vertices");
-        ImGui.Text($"{m.Materials.Count} material{(m.Materials.Count == 1 ? "" : "s")}, {m.Textures.Count} texture{(m.Textures.Count == 1 ? "" : "s")}");
-        if (m.IsRigged)
+        if (cached.Reading.IsFaulted)
         {
-            ImGui.Text($"{m.JointCount} bones, far version {m.Lod1.IndexCount / 3:N0} triangles");
+            ImGui.TextColored(Warning, $"can't load it: {cached.Reading.Exception?.InnerException?.Message ?? "unknown error"}");
+            return;
+        }
+        var m = cached.Reading.Result;
+        ImGui.Text($"{m.Triangles:N0} triangles, {m.Vertices:N0} vertices");
+        ImGui.Text($"{m.Materials} material{(m.Materials == 1 ? "" : "s")}, {m.Textures} texture{(m.Textures == 1 ? "" : "s")}");
+        if (m.Rigged)
+        {
+            ImGui.Text($"{m.Bones} bones, far version {m.FarTriangles:N0} triangles");
             ImGui.Text("Clips:");
             foreach (var clip in m.Clips)
                 ImGui.TextDisabled($"  {clip.Name}  {clip.Duration:0.00} s");
@@ -1012,10 +1055,35 @@ sealed partial class EditorApp
         public int SourceW, SourceH;
         public string Error = "";
         public double Used;
+        public volatile bool Dropped; // out of the cache: a decode still waiting for its turn is skipped
     }
 
     readonly Dictionary<string, ImagePreviewEntry> _images = [];
     const int MaxImages = 96;
+    static readonly SemaphoreSlim PreviewTurns = new(2);
+
+    /// <summary>A preview's work on a worker thread, two at a time, so a folder of images or models doesn't fill the thread pool.</summary>
+    static Task<T> InTurn<T>(Func<T> work) => Task.Run(async () =>
+    {
+        await PreviewTurns.WaitAsync();
+        try
+        {
+            return work();
+        }
+        finally
+        {
+            PreviewTurns.Release();
+        }
+    });
+
+    volatile bool _previewReady;
+
+    /// <summary>A preview finished on a worker thread: the next frame draws it (an idle editor draws only when something changed).</summary>
+    void PreviewReady()
+    {
+        _previewReady = true;
+        Window.Wake();
+    }
 
     /// <summary>A decoded, uploaded picture of an image file at most <paramref name="max"/> pixels across, or null while it decodes.</summary>
     ImagePreviewEntry? Thumbnail(FsEntry e, int max)
@@ -1026,8 +1094,14 @@ sealed partial class EditorApp
             if (img != null)
                 ReleaseImage(img);
             var file = _project.Absolute(e.Path);
-            img = new ImagePreviewEntry { Stamp = e.Modified, Decoding = Task.Run(() => DecodeSmall(file, max)) };
-            img.Decoding.ContinueWith(_ => Window.Wake());
+            var entry = img = new ImagePreviewEntry { Stamp = e.Modified, Used = ImGui.GetTime() }; // used now, so the trim keeps it
+            img.Decoding = InTurn(() =>
+            {
+                if (entry.Dropped)
+                    throw new OperationCanceledException(); // scrolled past before its turn came
+                return DecodeSmall(file, max);
+            });
+            img.Decoding.ContinueWith(_ => PreviewReady());
             _images[key] = img;
             TrimImages();
         }
@@ -1035,7 +1109,7 @@ sealed partial class EditorApp
         if (img.Decoding is { IsCompleted: true } done)
         {
             img.Decoding = null;
-            if (done.IsFaulted)
+            if (!done.IsCompletedSuccessfully)
                 img.Error = done.Exception?.InnerException?.Message ?? "can't read it";
             else
             {
@@ -1096,6 +1170,8 @@ sealed partial class EditorApp
         while (_images.Count > MaxImages)
         {
             var oldest = _images.MinBy(kv => kv.Value.Used);
+            if (oldest.Value.Used >= ImGui.GetTime())
+                break; // every one is on screen this frame: keep them until some aren't
             ReleaseImage(oldest.Value);
             _images.Remove(oldest.Key);
         }
@@ -1103,6 +1179,7 @@ sealed partial class EditorApp
 
     void ReleaseImage(ImagePreviewEntry img)
     {
+        img.Dropped = true;
         var (texture, reference) = (img.Texture, img.Ref);
         img.Texture = null;
         img.Ref = null;
@@ -1171,7 +1248,7 @@ sealed partial class EditorApp
         if (Key(ImGuiKey.Backspace)) Leave();
         if ((Key(ImGuiKey.Enter) || Key(ImGuiKey.KeypadEnter)) && cursor != null) Open(cursor);
         if (Key(ImGuiKey.Delete) && Targets(cursor) is { Count: > 0 } toTrash) AskTrash(toTrash);
-        if (Key(ImGuiKey.F2) && cursor != null) StartInput(FsInput.Rename, cursor.Name);
+        if (Key(ImGuiKey.F2) && cursor != null) StartInput(FsInput.Rename, cursor.Name, cursor.Path);
         if (Key(ImGuiKey.F1)) _fsHelp = true;
         if (Key(ImGuiKey.Escape))
         {
@@ -1184,7 +1261,7 @@ sealed partial class EditorApp
             if (Key(ImGuiKey.A)) foreach (var e in entries) _fsSelected.Add(e.Path);
             if (Key(ImGuiKey.C) && Targets(cursor) is { Count: > 0 } copy) Yank(copy, cut: false);
             if (Key(ImGuiKey.X) && Targets(cursor) is { Count: > 0 } cut) Yank(cut, cut: true);
-            if (Key(ImGuiKey.V)) Paste();
+            if (Key(ImGuiKey.V)) Paste(_fsDir);
             if (Key(ImGuiKey.F)) _fsFocusSearch = true;
         }
 
@@ -1237,8 +1314,12 @@ sealed partial class EditorApp
         else if (IsModel(path))
             _afterTree = () => Place(path, NewNodePosition(), _scene.Primary);
         else
-            Process.Start(new ProcessStartInfo("xdg-open", [_project.Absolute(path)]) { UseShellExecute = false })?.Dispose();
+            OnDesktop(path);
     }
+
+    /// <summary>Opens a file or folder with the desktop's app; without xdg-open (xdg-utils) it says so instead of closing the editor.</summary>
+    void OnDesktop(string path) =>
+        Safely(() => Process.Start(new ProcessStartInfo("xdg-open", [_project.Absolute(path)]) { UseShellExecute = false })?.Dispose());
 
     // --- View settings --------------------------------------------------------------------------------
 
@@ -1270,12 +1351,11 @@ sealed partial class EditorApp
 
     // --- Operations ----------------------------------------------------------------------------------
 
-    /// <summary>Paste: copies (or moves, after a cut) what was copied into this folder; a name that's taken gets _1, _2 and so on.</summary>
-    void Paste()
+    /// <summary>Paste: copies (or moves, after a cut) what was copied into a folder; a name that's taken gets _1, _2 and so on.</summary>
+    void Paste(string folder)
     {
         if (_fsYank is not { } yank)
             return;
-        var folder = _fsDir;
         _afterTree = () =>
         {
             foreach (var from in yank.Paths)
@@ -1353,9 +1433,14 @@ sealed partial class EditorApp
         _fsDelete = (paths, usedBy);
     }
 
-    void StartInput(FsInput kind, string initial)
+    string _fsInputInitial = "", _fsInputTarget = ""; // what the box opened with; what a rename renames
+
+    /// <summary>Opens the name box: <paramref name="initial"/> is "New folder/" or "new.scene.json" for a new one; <paramref name="target"/> is the item a rename renames.</summary>
+    void StartInput(FsInput kind, string initial, string target = "")
     {
         _fsInput = kind;
+        _fsInputInitial = initial;
+        _fsInputTarget = target;
         _fsInputEdit.SetValue(initial.AsSpan());
         _fsInputOpen = true;
     }
@@ -1374,9 +1459,10 @@ sealed partial class EditorApp
                 _fsInput = FsInput.None; // closed by clicking elsewhere
             return;
         }
+        var newFolder = _fsInputInitial.EndsWith('/');
         var title = _fsInput switch
         {
-            FsInput.Create => "New (name/ makes a folder, name.scene.json a scene):",
+            FsInput.Create => newFolder ? "New folder:" : "New scene:",
             _ => "Rename:",
         };
         ImGui.Text(title);
@@ -1384,23 +1470,31 @@ sealed partial class EditorApp
             ImGui.SetKeyboardFocusHere();
         ImGui.SetNextItemWidth(380);
         var enter = ImGui.InputText("##input", _fsInputEdit, ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll);
-        var text = _fsInputEdit.ToString();
+        var name = _fsInputEdit.ToString().Trim();
+        // A rename stays in its folder: a name with / or \ in it, or . or .., would move it
+        var badName = _fsInput == FsInput.Rename && (name.IndexOfAny(['/', '\\']) >= 0 || name is "." or "..");
+        if (badName && enter)
+            ImGui.SetKeyboardFocusHere(-1); // Enter left the field: back to it
+        if (badName)
+            ImGui.TextColored(Warning, "A name can't have / or \\ in it, or be . or ..");
         if (ImGui.IsKeyPressed(ImGuiKey.Escape))
         {
             _fsInput = FsInput.None;
             ImGui.CloseCurrentPopup();
         }
-        else if (enter)
+        else if (enter && !badName)
         {
             var kind = _fsInput;
             _fsInput = FsInput.None;
             ImGui.CloseCurrentPopup();
-            var name = text.Trim();
             if (kind == FsInput.Create && name.Length > 0)
-                Safely(() => Create(name));
-            else if (kind == FsInput.Rename && name.Length > 0 && entries.Count > 0)
             {
-                var e = entries[CursorIn(entries, _fsDir)];
+                // Typing over the selected "New folder/" or "new.scene.json" still makes a folder or a scene
+                var made = newFolder ? name.TrimEnd('/') + "/" : ProjectFiles.KeepExtension(_fsInputInitial, name);
+                Safely(() => Create(made));
+            }
+            else if (kind == FsInput.Rename && name.Length > 0 && RenameTarget(entries) is { } e)
+            {
                 var to = Join(Parent(e.Path), e.Folder ? name : ProjectFiles.KeepExtension(e.Name, name));
                 var folder = _fsDir;
                 if (to != e.Path)
@@ -1413,6 +1507,12 @@ sealed partial class EditorApp
         }
         ImGui.EndPopup();
     }
+
+    /// <summary>The item the rename box was opened on, if it's still there: shown in the content view, or a folder from the tree's menu.</summary>
+    FsEntry? RenameTarget(List<FsEntry> entries) =>
+        _fsInputTarget.Length == 0 ? null
+        : entries.Find(e => e.Path == _fsInputTarget)
+            ?? (Directory.Exists(_project.Absolute(_fsInputTarget)) ? new FsEntry(_fsInputTarget, Path.GetFileName(_fsInputTarget), true, 0, default, false) : null);
 
     /// <summary>A folder (name ending in /), a scene (.scene.json, then opened), or an empty file.</summary>
     void Create(string name)
@@ -1480,14 +1580,14 @@ sealed partial class EditorApp
         ImGui.Separator();
         if (ImGui.MenuItem("Copy" + many, "Ctrl+C")) Yank(targets, cut: false);
         if (ImGui.MenuItem("Cut" + many, "Ctrl+X")) Yank(targets, cut: true);
-        if (ImGui.MenuItem("Paste", "Ctrl+V", false, _fsYank != null)) Paste();
-        if (ImGui.MenuItem("Rename", "F2", false, targets.Count == 1)) StartInput(FsInput.Rename, e.Name);
+        if (ImGui.MenuItem("Paste", "Ctrl+V", false, _fsYank != null)) Paste(e.Folder ? path : _fsDir); // a folder's menu pastes into it
+        if (ImGui.MenuItem("Rename", "F2", false, targets.Count == 1)) StartInput(FsInput.Rename, e.Name, path);
         if (ImGui.MenuItem("Move to trash" + many, "Delete")) AskTrash(targets);
         ImGui.Separator();
         if (ImGui.MenuItem(_favorites.Contains(path) ? "Remove bookmark" : "Bookmark")) ToggleBookmark(path);
         if (ImGui.MenuItem("Copy path")) Copy(path);
         if (ImGui.MenuItem("Show in file manager"))
-            Process.Start(new ProcessStartInfo("xdg-open", [_project.Absolute(e.Folder ? path : Parent(path))]) { UseShellExecute = false })?.Dispose();
+            OnDesktop(e.Folder ? path : Parent(path));
     }
 
     void NewItems()

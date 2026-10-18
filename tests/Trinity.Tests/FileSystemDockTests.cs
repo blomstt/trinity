@@ -288,6 +288,41 @@ public sealed class FileSystemDockTests : IDisposable
         Assert.StartsWith(start, free);
     }
 
+    [Theory]
+    [InlineData(true, false)] // control: while the dock has focus, scene shortcuts wait
+    [InlineData(false, true)] // bug 6: closed with its X, the dock's last frame left _fsFocused true
+    public void Scene_shortcuts_work_once_the_dock_is_closed(bool dockShown, bool nodeMade)
+    {
+        using var dock = new HeadlessDock(_dir);
+        dock.Set("_scripts", new Trinity.Editor.Scripting.ScriptPanel(dock.Get<EditorProject>("_project"), default));
+        dock.Set("_fsFocused", true);
+        dock.Set("_showFileSystem", dockShown);
+        dock.Hold(ImGuiKey.Mod_Ctrl, true);
+        dock.Hold(ImGuiKey.Mod_Shift, true);
+        dock.Press(ImGuiKey.N, () => dock.Call("Shortcuts")); // Ctrl+Shift+N: a new node
+        Assert.Equal(nodeMade, dock.Get<EditorScene>("_scene").UndoSteps.Any());
+    }
+
+    [Theory]
+    [InlineData("Tiles")] // bug 4: the button reports the click on the release, the double-click shows on the press
+    [InlineData("ListRows")]
+    public void Double_click_opens_a_folder(string view)
+    {
+        using var dock = new HeadlessDock(_dir);
+        Directory.CreateDirectory(dock.File("Models"));
+        var entries = dock.Entries();
+        Setup(HeadlessDock.PathOf(entries[0]!) == "Models", "folders come first");
+        void Draw() => dock.Call(view, entries, 0, false);
+        dock.Frame(Draw); // the font's sizes are known from the first frame on
+        // Inside the first tile, or the first row (under the list's column titles)
+        var pad = ImGui.GetStyle().WindowPadding;
+        var (x, y) = view == "Tiles" ? (pad.X + 30, pad.Y + 30) : (pad.X + 30, pad.Y + ImGui.GetTextLineHeight() + 1 + ImGui.GetFrameHeight() / 2);
+        dock.Click(x, y, Draw);
+        Setup(dock.Get<Dictionary<string, string>>("_fsCursorIn").GetValueOrDefault("") == "Models", "the first click lands on Models");
+        dock.Click(x, y, Draw);
+        Assert.Equal("Models", dock.Get<string>("_fsDir"));
+    }
+
     [Fact]
     public void Opening_a_file_without_xdg_open_installed_doesnt_throw()
     {

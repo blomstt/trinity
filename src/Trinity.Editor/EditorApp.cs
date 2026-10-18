@@ -147,17 +147,17 @@ sealed partial class EditorApp : IDisposable
                 });
             }
             // Draw only when something changed: input in the last half second, playing animations, a
-            // new log line, or a once-a-second refresh for the stats. Otherwise don't draw at all:
-            // on Wayland each presented frame wakes the event wait again, so waiting isn't enough.
+            // new log line, a finished preview, or a once-a-second refresh for the stats. Otherwise don't
+            // draw at all: on Wayland each presented frame wakes the event wait again, so waiting isn't enough.
             Window.PollEvents();
             var t = clock.Elapsed.TotalSeconds;
-            var changed = Animating() || t - lastActivity < 0.5 || _logChanged || _view.Loading || Screenshot != null;
+            var changed = Animating() || t - lastActivity < 0.5 || _logChanged || _previewReady || _view.Loading || Screenshot != null;
             if (!changed && t - lastFrame < 1.0)
             {
                 Window.WaitEvents(1.0 - (t - lastFrame));
                 continue;
             }
-            _logChanged = false;
+            _logChanged = _previewReady = false;
             lastFrame = t;
             var now = clock.Elapsed.TotalSeconds;
             var dt = (float)Math.Min(now - last, 0.1);
@@ -447,8 +447,9 @@ sealed partial class EditorApp : IDisposable
         if (io.WantTextInput || _scripts.HasFocus)
             return;
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.S)) SaveScene();
-        // The FileSystem dock has its own keys (d, Delete, ctrl+d...); scene shortcuts wait while it has focus
-        if (_fsFocused)
+        // The FileSystem dock has its own keys (arrows, Delete, F2, Ctrl+C...); scene shortcuts wait while it
+        // has focus. Closed with its X, it kept the focus it last saw, so it counts only while it's shown.
+        if (_fsFocused && _showFileSystem)
             return;
         if (io.KeyCtrl && !io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.N)) NewScene();
         if (io.KeyCtrl && io.KeyShift && ImGui.IsKeyPressed(ImGuiKey.N)) _scene.CreateNode("Node", _scene.Primary);
@@ -947,7 +948,8 @@ sealed partial class EditorApp : IDisposable
     public void Dispose()
     {
         _runner.Dispose();
-        _gpu.WaitIdle();
+        // Releases still queued (a thumbnail evicted in the last frames) free UI textures: run them while the UI exists
+        _gpu.FlushReleases();
         ReleaseImages();
         _view.Dispose();
         _ui.Dispose();

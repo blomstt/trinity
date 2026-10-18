@@ -182,10 +182,26 @@ static class ProjectFiles
     internal static string Trash(string fullPath, string dataHome, string mounts, string uid)
     {
         var (trash, pathInInfo) = TrashFor(Path.GetFullPath(fullPath), dataHome, mounts, uid);
+        var home = Path.Combine(dataHome, "Trash");
+        try
+        {
+            if (trash != home && OperatingSystem.IsLinux())
+                Directory.CreateDirectory(trash, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); // only the user's, as the spec asks
+            Directory.CreateDirectory(Path.Combine(trash, "files"));
+            Directory.CreateDirectory(Path.Combine(trash, "info"));
+        }
+        catch (Exception e) when (trash != home && e is UnauthorizedAccessException or IOException)
+        {
+            // The drive's top can't be written to (a root-owned /mnt/data): a file can still go to the user's
+            // own trash, since a file move copies across drives; a folder move can't
+            if (Directory.Exists(fullPath))
+                throw new IOException($"the drive's trash, {trash}, can't be made ({e.Message}), and a folder can't be moved to another drive's trash", e);
+            (trash, pathInInfo) = (home, Path.GetFullPath(fullPath));
+            Directory.CreateDirectory(Path.Combine(trash, "files"));
+            Directory.CreateDirectory(Path.Combine(trash, "info"));
+        }
         var files = Path.Combine(trash, "files");
         var info = Path.Combine(trash, "info");
-        Directory.CreateDirectory(files);
-        Directory.CreateDirectory(info);
         var name = Path.GetFileName(fullPath.TrimEnd('/'));
         var unique = name;
         for (var i = 2; File.Exists(Path.Combine(files, unique)) || Directory.Exists(Path.Combine(files, unique)) || File.Exists(Path.Combine(info, unique + ".trashinfo")); i++)
@@ -269,10 +285,14 @@ static class ProjectFiles
     /// <summary>A path in <paramref name="folder"/> that isn't taken: "rock.glb", then "rock_1.glb" and so on.</summary>
     public static string FreeName(string root, string folder, string name)
     {
-        var ext = name.EndsWith(".scene.json", StringComparison.Ordinal) ? ".scene.json" : Path.GetExtension(name);
+        string Rel(string n) => folder.Length == 0 ? n : folder + "/" + n;
+        // A folder's name (v1.2) or a dotfile's (.gitignore) has no extension to keep at the end
+        var ext = Directory.Exists(Path.Combine(root, Rel(name))) ? ""
+            : name.EndsWith(".scene.json", StringComparison.Ordinal) ? ".scene.json" : Path.GetExtension(name);
+        if (ext.Length == name.Length)
+            ext = "";
         var stem = name[..^ext.Length];
         var candidate = name;
-        string Rel(string n) => folder.Length == 0 ? n : folder + "/" + n;
         for (var i = 1; File.Exists(Path.Combine(root, Rel(candidate))) || Directory.Exists(Path.Combine(root, Rel(candidate))); i++)
             candidate = $"{stem}_{i}{ext}";
         return Rel(candidate);
